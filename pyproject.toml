@@ -1,0 +1,29 @@
+[project]
+name = "eval-bench"
+version = "0.1.0"
+description = "Search-quality benchmark: LLM agents write facts and questions from PDFs, a regex audit checks them, and a local Qdrant test bed is scored."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "pymupdf>=1.24",
+    "pydantic>=2.12",
+    "pydantic-ai-slim[openai]==2.59.0",  # pinned: the Ollama/Gemma settings in bench/llm.py were checked against it
+    "qdrant-client>=1.15",
+    "typer>=0.12",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+bench = "bench.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
