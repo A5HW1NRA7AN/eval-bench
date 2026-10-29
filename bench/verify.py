@@ -9,7 +9,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from bench.pdf import NUMBER as NUMERIC_TOKEN
+
 MAX_QUOTE_CHARS = 300
+YEAR_SPAN = re.compile(r"\b(?:19|20)\d\d-\d\d\b")  # a reporting year such as 2024-25
 # Characters that PDFs and models write in several forms.
 VARIANTS = {"'": "['‘’`]", "‘": "['‘’`]", "’": "['‘’`]", '"': "[\"“”]", "“": "[\"“”]", "”": "[\"“”]",
             "-": "[-‐‑–—]", "‐": "[-‐‑–—]", "–": "[-‐‑–—]", "—": "[-‐‑–—]"}
@@ -38,6 +41,12 @@ def pages_of(segment: dict[str, Any], start: int, end: int) -> list[int]:
     return [hit[0], hit[-1]] if hit else []
 
 
+def table_row(quote: str) -> bool:
+    """Mostly numbers: a bare table row, which says nothing without its headers."""
+    tokens = quote.split()
+    return sum(bool(NUMERIC_TOKEN.match(t)) for t in tokens) >= len(tokens) / 2
+
+
 def verify_facts(segment: dict[str, Any], facts: list[dict[str, str]]) -> tuple[list[dict], list[dict]]:
     """Keep facts whose quote is in the segment text; record where it is. Returns (kept, rejected)."""
     kept, rejected, seen = [], [], set()
@@ -46,6 +55,7 @@ def verify_facts(segment: dict[str, Any], facts: list[dict[str, str]]) -> tuple[
         span = find(quote, segment["text"])
         reason = ("empty claim" if not claim else
                   f"quote longer than {MAX_QUOTE_CHARS} chars" if len(quote) > MAX_QUOTE_CHARS else
+                  "quote is a table row, not a sentence" if table_row(quote) else
                   "quote not found in the PDF text" if span is None else
                   "duplicate quote" if span in seen else None)
         if reason:
@@ -75,6 +85,8 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]]) -> str
         return "answer not found in its facts' quotes"
     if any(find(quote, q["question"]) for quote in quotes):
         return "question copies its quote"
+    if any(YEAR_SPAN.search(quote) for quote in quotes) and not re.search(r"\b(?:19|20)\d\d", q["question"]):
+        return "question drops its quote's year"
     words = len(q["question"].split())
     if q["type"] == "keyword" and not 2 <= words <= 5:
         return "keyword query must be 2-5 words"

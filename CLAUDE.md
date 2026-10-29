@@ -9,6 +9,7 @@ A search-quality benchmark. Agents write facts and questions from PDFs, a regex 
 - **Secrets stay in `.env`.** Never print or commit keys. `.env.example` holds no secrets (keys are left blank).
 - **Verification is regex, not AI.** A fact's quote must match the PDF text exactly, except for whitespace, quote style and dash style. A question's answer must match its facts' quotes.
 - **Never tune the benchmark to the search.** Questions are never kept or dropped because of retrieval results.
+- **After a change**, run `uv run pytest` and `uv run bench check`. Add a decision and its reason to the decision log in `GUIDE.md`.
 - **LLM access:**
   - Local Ollama (`gemma4:12b`, embeddings `bge-m3`) is the default.
   - The remote Gemma 4 endpoint (`LLM_PROVIDER=gemma`) is down after ~9 pm IST.

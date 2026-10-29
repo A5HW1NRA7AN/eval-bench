@@ -23,17 +23,18 @@ from bench.verify import verify_facts, verify_questions
 
 FACTS = DATA_DIR / "facts.jsonl"
 QUESTIONS = DATA_DIR / "questions.jsonl"
-FACTS_VERSION = "facts-v2"
-QUESTIONS_VERSION = "questions-v4"  # bump when a prompt or the row format changes
+FACTS_VERSION = "facts-v3"  # bump when a prompt or the row format changes
+QUESTIONS_VERSION = "questions-v5"
 
 FACT_PROMPT = """You extract facts from a document for a search benchmark. Each fact must be something \
 a farmer or veterinarian could search for, and the search must be able to find it in the TEXT.
 
 For each fact give:
 - claim: one self-contained statement. Name the subject and every qualifier that makes it true \
-(animal, breed, age or stage, condition, quantity and unit). Never write "it", "this" or "they".
+(animal, breed, age or stage, condition, quantity and unit, and the year, place, scale or scheme it \
+applies to). Never write "it", "this" or "they".
 - quote: one or two consecutive sentences copied exactly from the TEXT (same words, spelling and \
-punctuation), at most 300 characters, that state the fact.
+punctuation), at most 300 characters, that state the fact. Never quote a bare table row or a list of numbers.
 
 Prefer specific, checkable facts: numbers, doses, timings, conditions, causes and recommendations.
 Quote only the TEXT, never the CONTEXT. Skip anything already listed under FACTS SO FAR.
@@ -41,13 +42,15 @@ Return at most the number of facts asked for, or an empty list if the TEXT has n
 
 QUESTION_PROMPT = """You write questions for a benchmark that checks whether a search engine finds the \
 passage that answers them. You get verified facts from one document section, each with an id, a claim \
-and the exact quote it comes from. The search covers a library of many documents, so every question must \
-make sense on its own: name its subject and qualifiers (e.g. Aflatoxin, the animal, the feed, the stage), \
-never "it" or "this".
+and the exact quote it comes from. The search covers a library of many documents that may give other \
+values for other years, places, animals or schemes, so every question must make sense on its own: name its \
+subject and every qualifier its answer depends on (e.g. Aflatoxin, the animal or class, the feed, the stage, \
+the year, the country or state, the scale, the scheme). Never write "it", "this" or "the system".
 
 Write at most the number of questions asked for, covering these types (at least one of each when the facts allow):
 - direct: a natural question answered by one fact.
-- paraphrased: like direct, but worded the way a farmer would ask, avoiding the quote's key words.
+- paraphrased: like direct, but worded the way a farmer would ask, avoiding the quote's key words \
+(names such as Aflatoxin or INAPH stay).
 - keyword: a 2-5 word search query, the way people type into a search box.
 - precise: asks for an exact number, dose, age, duration or limit from the quote (the answer holds that \
 number), keeping the question's qualifiers.

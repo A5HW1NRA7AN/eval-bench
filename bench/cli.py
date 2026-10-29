@@ -52,5 +52,42 @@ def evaluate() -> None:
     run_evaluate()
 
 
+@app.command()
+def run() -> None:
+    """Run every stage in order, checking each stage's output before the next one starts."""
+    from bench.agents import run_facts, run_questions
+    from bench.checks import print_checks
+    from bench.evaluate import run_evaluate
+    from bench.segments import run_segments
+    from bench.testbed import run_index
+
+    stages = {"segment": run_segments, "facts": run_facts, "questions": run_questions, "index": run_index,
+              "evaluate": run_evaluate}
+    for name, stage in stages.items():
+        typer.echo(f"\n== {name}")
+        stage()
+        if not print_checks([name]):
+            raise typer.Exit(f"stopped: the {name} output failed a check")
+
+
+@app.command()
+def check(stage: str = typer.Argument(None, help="segment, facts, questions, index or evaluate (all if left out)")) -> None:
+    """Check every stage's saved output without the LLM: is it complete, verbatim and in step?"""
+    from bench.checks import STAGES, print_checks
+
+    if stage and stage not in STAGES:
+        raise typer.BadParameter(f"choose one of {', '.join(STAGES)}")
+    if not print_checks([stage] if stage else None):
+        raise typer.Exit(1)
+
+
+@app.command()
+def serve(port: int = typer.Option(8000, help="Port on 127.0.0.1")) -> None:
+    """Browse every stage's output as JSON (for Postman or a browser) on http://127.0.0.1:<port>."""
+    from bench.serve import run_server
+
+    run_server(port)
+
+
 if __name__ == "__main__":
     app()

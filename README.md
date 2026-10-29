@@ -4,6 +4,8 @@ A benchmark for **search quality**: how well does our search find the passage th
 
 LLM agents read our PDFs, pull out facts and write questions about them. A regex audit (no AI) checks that every fact and answer really is in the PDF. The verified questions are then run against a search system, and we score whether the right passage came back. Today that system is a **local Qdrant test bed** built from the same PDFs.
 
+**New here? Read [GUIDE.md](GUIDE.md).** It is a hands-on walkthrough of every stage, how to check and inspect each one, and why the project is built this way.
+
 ## How it works
 
 ```
@@ -36,12 +38,13 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
 5. **evaluate**: each question is embedded and searched. Gold chunks are the ones that overlap its evidence quote, so scoring needs no judging. The report shows hit@1/3/5/10 and MRR by question type, plus every miss with what came back instead.
 
 **The regex audit:**
-- **Facts:** the quote must appear in the segment text, ignoring only whitespace, quote style and dash style, and be at most 300 characters. Duplicates are dropped.
+- **Facts:** the quote must appear in the segment text, ignoring only whitespace, quote style and dash style. It must be at most 300 characters and not a bare table row (mostly numbers). Duplicates are dropped.
 - **Questions:** each must refer to verified facts. Its answer is a single span, or one span per fact joined by `; `, and each span must appear in their quotes. Type rules apply:
   - keyword queries are 2–5 words;
   - precise answers contain a number, in digits or as a number word (e.g. `four`, `twice`, `lakh`);
   - multi-fact questions use at least two facts, with answer spans from at least two of them;
   - at most half of a paraphrase's content words may come from its quote;
+  - a question whose quote states a reporting year (e.g. 2024-25) must name a year;
   - no question may copy its quote.
 - **Rejected items** are kept in the output with the reason.
 
@@ -61,6 +64,14 @@ Put the PDFs in `pdfs/`.
 
 ## Run
 
+The entry point is the `bench` command (`bench/cli.py`; `python -m bench` works too). `bench run` runs every stage in order and checks each stage's output before the next one starts:
+
+```
+uv run bench run              # segment → facts → questions → index → evaluate, with checks
+```
+
+Or one stage at a time:
+
 ```
 uv run bench segment          # new or removed PDFs are picked up; --refresh re-reads them all
 uv run bench facts            # --max-facts 10, --doc <part of a file name>, --force to redo
@@ -68,6 +79,18 @@ uv run bench questions        # --max-questions 8, --doc, --force
 uv run bench index
 uv run bench evaluate
 ```
+
+## Check and inspect
+
+```
+uv run bench check            # checks every stage's saved output without the LLM (or: bench check facts)
+uv run bench serve            # a read-only JSON API over every stage's output on http://127.0.0.1:8000
+```
+
+Import `postman/eval-bench.postman_collection.json` into Postman. It holds requests for three things:
+- the local Qdrant: browse chunks, filter by PDF or segment, and run a two-step semantic search;
+- every stage's output, through `bench serve`;
+- the local Ollama models.
 
 The `facts` and `questions` stages save after every segment. They skip segments already done at the current prompt version, so a stopped run picks up where it left off, and a bumped version redoes the old rows. After changing a stage, re-run the stages that follow it (`--force` where needed). `evaluate` stops if a question's evidence no longer matches the indexed text.
 
@@ -89,5 +112,8 @@ The `facts` and `questions` stages save after every segment. They skip segments 
 
 ```
 bench/      cli.py · config.py · llm.py · pdf.py · segments.py · agents.py · verify.py · testbed.py · evaluate.py
+            checks.py (bench check) · serve.py (bench serve)
 tests/      offline tests (no LLM or Qdrant needed): uv run pytest
+postman/    the Postman collection
+GUIDE.md    walkthrough and decision log
 ```

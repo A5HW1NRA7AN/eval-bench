@@ -71,7 +71,7 @@ def run_index() -> None:
         client.delete_collection(COLLECTION)
     client.create_collection(COLLECTION, vectors_config=models.VectorParams(size=len(vectors[0]), distance=models.Distance.COSINE))
     points = [models.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, r["chunk_id"])), vector=v,
-                                 payload={k: r[k] for k in ("chunk_id", "segment_id", "file_name", "pages")})
+                                 payload={k: r[k] for k in ("chunk_id", "segment_id", "file_name", "pages", "text")})
               for r, v in zip(rows, vectors)]
     for i in range(0, len(points), 256):
         client.upsert(COLLECTION, points=points[i : i + 256], wait=True)

@@ -1,0 +1,692 @@
+{
+  "info": {
+    "name": "eval-bench",
+    "description": "Look inside the search benchmark: the local Qdrant test bed, every stage's output (via `uv run bench serve`) and the local Ollama models. Everything is read-only and local; no keys are needed. See GUIDE.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "qdrant",
+      "value": "http://127.0.0.1:6333"
+    },
+    {
+      "key": "bench",
+      "value": "http://127.0.0.1:8000"
+    },
+    {
+      "key": "ollama",
+      "value": "http://localhost:11434"
+    },
+    {
+      "key": "collection",
+      "value": "bench_docs"
+    },
+    {
+      "key": "doc",
+      "value": "Aflatoxin"
+    },
+    {
+      "key": "file_name",
+      "value": "Aflatoxin in feed and milk.pdf"
+    },
+    {
+      "key": "segment_id",
+      "value": "aflatoxin-in-feed-and-milk-01"
+    },
+    {
+      "key": "question",
+      "value": "How long does Aflatoxin take to appear in milk after a cow eats contaminated feed?"
+    },
+    {
+      "key": "point_id",
+      "value": ""
+    },
+    {
+      "key": "offset",
+      "value": ""
+    },
+    {
+      "key": "vector",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Qdrant: the local test bed",
+      "description": "Start Qdrant first: docker compose up -d",
+      "item": [
+        {
+          "name": "List collections",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{qdrant}}/collections",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections"
+              ]
+            },
+            "description": "Every collection in the local Qdrant."
+          }
+        },
+        {
+          "name": "Collection info",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}"
+              ]
+            },
+            "description": "Vector size (1024 for bge-m3), distance (cosine) and point count."
+          }
+        },
+        {
+          "name": "Count chunks",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/count",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "count"
+              ]
+            },
+            "description": "One point per chunk.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"exact\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Browse chunks",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/scroll",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "scroll"
+              ]
+            },
+            "description": "The first 5 chunks. Each payload holds chunk_id, segment_id, file_name, pages and the chunk text. Saves the first id as {{point_id}} and the next page as {{offset}}.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 5,\n  \"with_payload\": true,\n  \"with_vector\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const result = pm.response.json().result;",
+                  "if (result.points.length) pm.collectionVariables.set('point_id', result.points[0].id);",
+                  "pm.collectionVariables.set('offset', result.next_page_offset || '');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Browse the next chunks",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/scroll",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "scroll"
+              ]
+            },
+            "description": "Run 'Browse chunks' first; each run moves {{offset}} one page on.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 5,\n  \"offset\": \"{{offset}}\",\n  \"with_payload\": true,\n  \"with_vector\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('offset', pm.response.json().result.next_page_offset || '');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chunks of one PDF",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/scroll",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "scroll"
+              ]
+            },
+            "description": "Filter on the payload: the chunks of {{file_name}}.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 10,\n  \"with_payload\": true,\n  \"with_vector\": false,\n  \"filter\": {\n    \"must\": [\n      {\n        \"key\": \"file_name\",\n        \"match\": {\n          \"value\": \"{{file_name}}\"\n        }\n      }\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Chunks of one segment",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/scroll",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "scroll"
+              ]
+            },
+            "description": "The chunks of one TOC segment ({{segment_id}}), as the evaluation sees them.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 20,\n  \"with_payload\": true,\n  \"with_vector\": false,\n  \"filter\": {\n    \"must\": [\n      {\n        \"key\": \"segment_id\",\n        \"match\": {\n          \"value\": \"{{segment_id}}\"\n        }\n      }\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "One chunk by id",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/{{point_id}}",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "{{point_id}}"
+              ]
+            },
+            "description": "Run 'Browse chunks' first to set {{point_id}}."
+          }
+        },
+        {
+          "name": "Semantic search 1: embed the question",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{ollama}}/api/embed",
+              "host": [
+                "{{ollama}}"
+              ],
+              "path": [
+                "api",
+                "embed"
+              ]
+            },
+            "description": "Turns {{question}} into a 1024-number bge-m3 vector, as `bench evaluate` does, and saves it as {{vector}}.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"bge-m3\",\n  \"input\": \"{{question}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('vector', JSON.stringify(pm.response.json().embeddings[0]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Semantic search 2: nearest chunks",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{qdrant}}/collections/{{collection}}/points/query",
+              "host": [
+                "{{qdrant}}"
+              ],
+              "path": [
+                "collections",
+                "{{collection}}",
+                "points",
+                "query"
+              ]
+            },
+            "description": "The 5 chunks closest to {{vector}}. Run 'Semantic search 1' first.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": {{vector}},\n  \"limit\": 5,\n  \"with_payload\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Pipeline outputs (bench serve)",
+      "description": "Start the API first: uv run bench serve",
+      "item": [
+        {
+          "name": "Endpoints",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": []
+            },
+            "description": "What `bench serve` offers. Start it first: uv run bench serve"
+          }
+        },
+        {
+          "name": "Pages: one page, clean and raw",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/pages?doc={{doc}}&page=24",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "pages"
+              ],
+              "query": [
+                {
+                  "key": "doc",
+                  "value": "{{doc}}"
+                },
+                {
+                  "key": "page",
+                  "value": "24"
+                }
+              ]
+            },
+            "description": "Compare `text` (cleaned) with `raw_text` (straight from the PDF) to see what cleaning removed."
+          }
+        },
+        {
+          "name": "TOC agent: parsed tables of contents",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/toc",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "toc"
+              ]
+            },
+            "description": "The LLM's TOC parse per PDF, as cached in data/toc/."
+          }
+        },
+        {
+          "name": "Segments of a PDF",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/segments?doc={{doc}}",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "segments"
+              ],
+              "query": [
+                {
+                  "key": "doc",
+                  "value": "{{doc}}"
+                }
+              ]
+            },
+            "description": "Title, pages and whether each segment is used for questions."
+          }
+        },
+        {
+          "name": "One segment with its text",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/segments/{{segment_id}}",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "segments",
+                "{{segment_id}}"
+              ]
+            },
+            "description": "The text the fact agent read, its page map and TOC headings."
+          }
+        },
+        {
+          "name": "Fact agent: facts of a PDF",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/facts?doc={{doc}}",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "facts"
+              ],
+              "query": [
+                {
+                  "key": "doc",
+                  "value": "{{doc}}"
+                }
+              ]
+            },
+            "description": "Verified facts (claim, verbatim quote, position, pages) and rejected ones with the audit's reason."
+          }
+        },
+        {
+          "name": "Fact agent: facts of one segment",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/facts?segment={{segment_id}}",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "facts"
+              ],
+              "query": [
+                {
+                  "key": "segment",
+                  "value": "{{segment_id}}"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Question agent: questions of a PDF",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/questions?doc={{doc}}",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "doc",
+                  "value": "{{doc}}"
+                }
+              ]
+            },
+            "description": "Verified questions with their answer span and evidence, and rejected ones with the reason."
+          }
+        },
+        {
+          "name": "Question agent: one type only",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/questions?type=paraphrased",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "questions"
+              ],
+              "query": [
+                {
+                  "key": "type",
+                  "value": "paraphrased"
+                }
+              ]
+            },
+            "description": "Types: direct, paraphrased, keyword, precise, multi_fact."
+          }
+        },
+        {
+          "name": "Evaluation: misses only",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/results?misses=1",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "results"
+              ],
+              "query": [
+                {
+                  "key": "misses",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "Questions whose evidence was not in the top 10, with what came back instead."
+          }
+        },
+        {
+          "name": "Evaluation: the report",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/report",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "report"
+              ]
+            },
+            "description": "The scored report (Markdown)."
+          }
+        },
+        {
+          "name": "Checks on every stage",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/checks",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "checks"
+              ]
+            },
+            "description": "The same checks as `bench check`."
+          }
+        },
+        {
+          "name": "Search the test bed in one step",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/search?q={{question}}&k=5",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{question}}"
+                },
+                {
+                  "key": "k",
+                  "value": "5"
+                }
+              ]
+            },
+            "description": "Embeds {{question}} and returns the top chunks with their text."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Ollama: local models",
+      "item": [
+        {
+          "name": "Installed models",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ollama}}/api/tags",
+              "host": [
+                "{{ollama}}"
+              ],
+              "path": [
+                "api",
+                "tags"
+              ]
+            },
+            "description": "gemma4:12b writes; bge-m3 embeds."
+          }
+        },
+        {
+          "name": "Loaded models",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ollama}}/api/ps",
+              "host": [
+                "{{ollama}}"
+              ],
+              "path": [
+                "api",
+                "ps"
+              ]
+            },
+            "description": "Which models are in memory, and their context size."
+          }
+        }
+      ]
+    }
+  ]
+}

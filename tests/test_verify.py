@@ -25,11 +25,13 @@ def test_fact_audit_keeps_verbatim_quotes_and_records_where_they_are():
     facts = [{"claim": "Pregnant animals get 1 kg extra feed.", "quote": "1 kg good quality oil cake should also be given"},
              {"claim": "Invented.", "quote": "Calves need 5 litres of milk a day."},
              {"claim": "Dup.", "quote": "1 kg good quality oil cake should also be given"},
-             {"claim": "", "quote": "Milking animals should be fed 2 kg"}]
+             {"claim": "", "quote": "Milking animals should be fed 2 kg"},
+             {"claim": "Punjab grew 464.", "quote": "Punjab 444 434 432 436 480 464"}]
     kept, rejected = verify_facts(SEGMENT, facts)
     assert [f["fact_id"] for f in kept] == ["book-01:f01"] and kept[0]["pages"] == [6, 6]
     assert TEXT[kept[0]["start"] : kept[0]["end"]].startswith("1 kg good")
-    assert [r["reason"] for r in rejected] == ["quote not found in the PDF text", "duplicate quote", "empty claim"]
+    assert [r["reason"] for r in rejected] == ["quote not found in the PDF text", "duplicate quote", "empty claim",
+                                               "quote is a table row, not a sentence"]
 
 
 def test_question_audit_rules():
@@ -43,6 +45,10 @@ def test_question_audit_rules():
     assert question_problem({**ok, "fact_ids": ["f9"]}, facts) == "refers to a fact that isn't verified"
     assert question_problem({**ok, "type": "keyword", "question": "oil cake pregnant animals late pregnancy dose"}, facts)
     assert question_problem({**ok, "type": "multi_fact"}, facts) == "multi_fact needs two facts"
+    yearly = {"f3": {"quote": "Milk production reached 247.87 million tonnes in 2024-25."}}
+    asked = {"type": "precise", "fact_ids": ["f3"], "answer": "247.87 million tonnes"}
+    assert question_problem({**asked, "question": "What was India's milk production?"}, yearly) == "question drops its quote's year"
+    assert question_problem({**asked, "question": "What was India's milk production in 2024-25?"}, yearly) is None
     both = {"type": "multi_fact", "question": "How much feed for milking and pregnant animals?", "fact_ids": ["f1", "f2"]}
     assert question_problem({**both, "answer": "1 kg; 2 kg"}, facts) is None
     assert question_problem({**both, "answer": "1 kg"}, facts) == "multi_fact answer needs a span from each fact"
