@@ -27,6 +27,7 @@ def _data(tmp_path, monkeypatch, fact_start=0):
     for name, path in paths.items():
         monkeypatch.setattr(checks, name, path)
     monkeypatch.setattr(checks, "PDF_DIR", tmp_path / "pdfs")
+    monkeypatch.setattr(checks, "QUESTIONS", tmp_path / "questions.jsonl")  # not written: never the real data/ file
     monkeypatch.setattr(checks, "DATA_DIR", tmp_path)
     return paths
 
@@ -54,3 +55,32 @@ def test_api_routes(tmp_path, monkeypatch):
     assert serve.route("/segments/book-99", {})[0] == 404 and serve.route("/nope", {})[0] == 404
     with pytest.raises(LookupError):  # the server answers 404: run `bench facts` first
         serve.route("/facts", {})
+
+
+def test_agent_calls_are_traced_and_the_workbook_has_every_sheet(tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+    from pydantic import BaseModel
+    from pydantic_ai import Agent, ModelResponse, NativeOutput, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from bench import export, llm
+
+    class Out(BaseModel):
+        items: list[str]
+
+    agent = Agent(FunctionModel(lambda m, i: ModelResponse(parts=[TextPart('{"items": ["a", "b"]}')])),
+                  output_type=NativeOutput(Out, strict=True))
+    assert llm.call("tester", agent, "say two things", "book-01").items == ["a", "b"]
+    call = json.loads(llm.TRACE.read_text())
+    assert call["role"] == "tester" and call["prompt"] == "say two things" and call["output"] == {"items": ["a", "b"]}
+
+    paths = _data(tmp_path, monkeypatch, fact_start=TEXT.index("colostrum"))
+    for name in ("SEGMENTS", "FACTS", "PAGES"):
+        monkeypatch.setattr(export, name, paths[name])
+    for name, path in {"QUESTIONS": "q.jsonl", "RESULTS": "r.jsonl", "CHUNKS": "c.jsonl", "WORKBOOK": "bench.xlsx"}.items():
+        monkeypatch.setattr(export, name, tmp_path / path)
+    monkeypatch.setattr(export, "TRACE", llm.TRACE)
+    book = load_workbook(export.run_export())
+    assert book.sheetnames == ["Overview", "Segments", "Facts", "Checks", "Agent calls"]  # no questions or results yet
+    row = {head.value: cell.value for head, cell in zip(book["Facts"][1], book["Facts"][2])}
+    assert row["fact_id"] == "book-01:f01" and row["claim"] == "Calves need colostrum early."

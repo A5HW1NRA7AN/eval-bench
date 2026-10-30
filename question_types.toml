@@ -1,0 +1,87 @@
+# Question types. Each table is one type; adding or changing a type needs no code change.
+#
+# count   questions per section (for source "library": in total)
+# source  what the type's writer agent reads:
+#           facts      the section's verified facts
+#           paragraph  the section's facts that span several sentences (sizes passage and paragraph)
+#           absent     the section's facts, to write a question the library can't answer
+#           question   the section's verified questions of the types in `from`, to rewrite
+#           library    every verified fact of every section, to link facts across sections
+# prompt  what the writer is told this type is
+# rules   checked by the regex audit (bench/verify.py):
+#           words = [min, max]      words in the question
+#           facts = [min, max]      distinct facts the question uses
+#           pieces = [min, max]     answer spans, joined by "; "
+#           span_per_fact = true    each fact gives at least one answer span
+#           needs_number = true     the answer holds a number, in digits or words
+#           max_quote_words = 0.5   at most this share of the question's content words come from its quotes
+#           sections = 2            the facts come from at least this many sections
+#           absent_term = true      the question names a term that appears nowhere in the library
+#           rewrites_source = true  the question differs from the question it rewrites
+# Every type also follows the general rules: its facts are verified, its answer spans are in their quotes,
+# it doesn't copy a quote, and it names the year when its quote states a reporting year (e.g. 2024-25).
+
+[direct]
+count = 2
+source = "facts"
+prompt = "A natural question answered by one fact."
+rules = { facts = [1, 1] }
+
+[paraphrased]
+count = 2
+source = "facts"
+prompt = """Like direct, but worded the way a farmer would ask, avoiding the quote's key words \
+(names such as Aflatoxin or INAPH stay)."""
+rules = { facts = [1, 1], max_quote_words = 0.5 }
+
+[keyword]
+count = 1
+source = "facts"
+prompt = "A 2-5 word search query, the way people type into a search box."
+rules = { words = [2, 5], facts = [1, 1] }
+
+[precise]
+count = 2
+source = "facts"
+prompt = """Asks for an exact number, dose, age, duration or limit from the quote (the answer holds that \
+number), keeping the question's qualifiers."""
+rules = { facts = [1, 1], needs_number = true }
+
+[multi_fact]
+count = 1
+source = "facts"
+prompt = "One natural question about a single topic whose full answer needs two different facts; list both ids."
+rules = { facts = [2, 3], pieces = [2, 3], span_per_fact = true }
+
+[comparison]
+count = 1
+source = "paragraph"
+prompt = """Asks to compare two or more things, or to list the items, steps or conditions that one passage \
+gives (e.g. "Which raw materials are high and which are low in Aflatoxin B1?"). The answer gives each part, \
+each copied from the quote."""
+rules = { facts = [1, 1], pieces = [2, 6] }
+
+[unanswerable]
+count = 1
+source = "absent"
+prompt = """A question a farmer could plausibly ask that this library can't answer: take a fact and change \
+one qualifier to something the documents never mention (another animal, product, disease, country or \
+scheme). Put that new word or phrase in absent_term, leave answer empty and list the fact you changed."""
+rules = { facts = [1, 1], absent_term = true }
+
+[noisy]
+count = 1
+source = "question"
+from = ["direct", "paraphrased", "precise"]
+prompt = """Rewrite a question the way a farmer types it into a phone chat: lower case, short, a typo or \
+two, maybe Hindi words in English letters (doodh, bhains, kitna, chara), little grammar. Keep every \
+qualifier the answer depends on."""
+rules = { words = [2, 15], rewrites_source = true }
+
+[multi_hop]
+count = 10
+source = "library"
+prompt = """One natural question whose answer needs facts from two different sections or documents (e.g. \
+a limit in one and a cause or remedy in another). List the ids of both facts; the answer has one span \
+from each."""
+rules = { facts = [2, 3], pieces = [2, 3], span_per_fact = true, sections = 2 }

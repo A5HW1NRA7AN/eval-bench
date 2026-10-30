@@ -1,5 +1,6 @@
 from bench import segments
-from bench.segments import BOILERPLATE, TocEntry, heading_path, keep_valid, label, locate, normalize, parts, segment_pdf
+from bench.segments import (BOILERPLATE, TocEntry, heading_path, keep_valid, label, locate, normalize, parts, segment_pdf,
+                            sentences)
 
 SENT = "Give the calf colostrum within two hours of birth for good immunity. "  # 69 chars
 
@@ -107,3 +108,14 @@ def test_a_title_wrapped_around_its_page_number_is_kept():
     toc = "3. Managing Dairy Animals for Optimum Productivity 46\nand Health\n4. Housing 58"
     entry = TocEntry(number="3", title="Managing Dairy Animals for Optimum Productivity and Health", printed_page=46, level=1)
     assert keep_valid([entry], toc) == [entry]
+
+
+def test_sentences_are_numbered_by_paragraph_and_point_into_the_text():
+    text = ("1. \nWhat is the limit?\n\nBIS has set 20 µg/kg (ppb) for feed, e.g. cattle feed. The FDA set the \n"
+            "same limit. Dr. Rao agrees.\n\nIt peaks after 24 hrs. Clearance takes 4 days.")
+    found = sentences(text)
+    cut = {s["id"]: text[s["start"] : s["end"]] for s in found}
+    assert list(cut) == ["p1.s1", "p2.s1", "p2.s2", "p2.s3", "p3.s1", "p3.s2"]
+    assert cut["p1.s1"] == "1. \nWhat is the limit?"  # a list number is not a sentence end
+    assert cut["p2.s1"] == "BIS has set 20 µg/kg (ppb) for feed, e.g. cattle feed."  # nor is "e.g."
+    assert cut["p2.s3"] == "Dr. Rao agrees." and cut["p3.s2"] == "Clearance takes 4 days."

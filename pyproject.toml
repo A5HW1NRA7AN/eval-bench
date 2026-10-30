@@ -10,6 +10,8 @@ dependencies = [
     "qdrant-client>=1.15",
     "typer>=0.12",
     "python-dotenv>=1.0",
+    "openpyxl>=3.1",
+    "rich>=13",
 ]
 
 [dependency-groups]

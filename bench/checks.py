@@ -7,21 +7,28 @@ with the stage before it, and the fix is to re-run that stage.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from bench.agents import FACTS, FACTS_VERSION, QUESTIONS, QUESTIONS_VERSION
-from bench.config import DATA_DIR, PDF_DIR
+from bench.config import DATA_DIR, PDF_DIR, question_types
 from bench.evaluate import REPORT
-from bench.pdf import read_jsonl
+from bench.facts import FACTS, FACTS_VERSION
+from bench.pdf import PAGES, read_jsonl
+from bench.questions import LIBRARY, QUESTIONS, QUESTIONS_VERSION
 from bench.segments import SEGMENTS, TOC_VERSION, find_toc_pages, slug
 from bench.testbed import CHUNKS, COLLECTION, qdrant
-from bench.verify import MAX_QUOTE_CHARS, find, question_problem, table_row
+from bench.verify import MAX_QUOTE_CHARS, claim_problem, find, question_problem, table_row
 
-PAGES = DATA_DIR / "pages.jsonl"
 RESULTS = DATA_DIR / "results.jsonl"
 Check = tuple[str, bool, str]
+
+
+def reason_group(reason: str) -> str:
+    """One name per audit rule: '"goats" is in the library…' and 'needs 2-5 words, has 9' lose their specifics."""
+    rule = re.sub(r"^overlaps .*", "overlaps a kept fact", reason.split(":")[0])
+    return re.sub(r"\d+", "N", re.sub(r'"[^"]*"', "a term", rule))
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -66,7 +73,7 @@ def check_segment() -> list[Check]:
 
 
 def check_facts() -> list[Check]:
-    """Facts: current prompt version, quotes still verbatim at their positions, quote rules hold."""
+    """Facts: current prompt version, quotes still verbatim at their positions, fact rules hold."""
     if not FACTS.exists():
         return _missing(FACTS, "facts")
     segments = {s["segment_id"]: s for s in _rows(SEGMENTS)}
@@ -75,41 +82,53 @@ def check_facts() -> list[Check]:
     todo = [sid for sid, s in segments.items() if s["use_for_questions"] and sid not in done]
     moved, broken = [], []
     for r in rows:
-        text = segments.get(r["segment_id"], {}).get("text", "")
+        segment = segments.get(r["segment_id"], {"text": "", "title": "", "file_name": "", "headings": []})
         for f in r["facts"]:
-            if find(f["quote"], text[f["start"] : f["end"]]) is None:
+            if find(f["quote"], segment["text"][f["start"] : f["end"]]) is None:
                 moved.append(f["fact_id"])
-            if len(f["quote"]) > MAX_QUOTE_CHARS or table_row(f["quote"]):
+            if len(f["quote"]) > MAX_QUOTE_CHARS or table_row(f["quote"]) or claim_problem(f["claim"], f["quote"], segment):
                 broken.append(f["fact_id"])
     kept, rejected = sum(len(r["facts"]) for r in rows), Counter(x["reason"] for r in rows for x in r["rejected"])
+    reasons = Counter(reason_group(reason) for reason in rejected.elements())
     return [
         (f"every question segment has facts ({FACTS_VERSION})", not todo, f"{len(done)} segments done" + (f"; to do: {todo[:3]}" if todo else "")),
         ("every quote is verbatim at its recorded position", not moved, f"{kept} facts" + (f"; moved: {moved[:3]}" if moved else "")),
-        ("every quote follows the quote rules", not broken, f"the audit rejected {sum(rejected.values())}: {dict(rejected)}"),
+        ("every fact follows the fact rules", not broken, f"the audit rejected {sum(rejected.values())}: {dict(reasons)}"
+         + (f"; breaking: {broken[:3]}" if broken else "")),
     ]
 
 
 def check_questions() -> list[Check]:
-    """Questions: current version, still pass the audit against their facts, evidence still in place."""
+    """Questions: valid types, current version, still pass the audit against their facts, evidence still in place."""
+    try:
+        types = question_types()
+    except SystemExit as exc:
+        return [("question_types.toml is valid", False, str(exc))]
     if not QUESTIONS.exists():
         return _missing(QUESTIONS, "questions")
     segments = {s["segment_id"]: s for s in _rows(SEGMENTS)}
     facts = {f["fact_id"]: f for r in _rows(FACTS) for f in r["facts"]}
+    corpus = "\n".join(p["text"] for p in _rows(PAGES))
     rows = read_jsonl(QUESTIONS)
-    done = {r["segment_id"] for r in rows if r["version"] == QUESTIONS_VERSION}
+    facts_version = {r["segment_id"]: r["version"] for r in _rows(FACTS)} | {LIBRARY: FACTS_VERSION}
+    done = {r["segment_id"] for r in rows if r["version"] == QUESTIONS_VERSION and r.get("facts_version") == facts_version.get(r["segment_id"])}
     todo = [sid for sid in {r["segment_id"] for r in _rows(FACTS) if r["facts"]} if sid not in done]
     failing, moved = [], []
     questions = [q for r in rows for q in r["questions"]]
     for q in questions:
-        if problem := question_problem(q, facts):
+        if q["type"] not in types:
+            failing.append(f"{q['question_id']} (type {q['type']} is not in question_types.toml)")
+        elif problem := question_problem(q, facts, types[q["type"]].get("rules", {}), corpus):
             failing.append(f"{q['question_id']} ({problem})")
-        text = segments.get(q["question_id"].rsplit(":", 1)[0], {}).get("text", "")
-        if any(find(ev["quote"], text[ev["start"] : ev["end"]]) is None for ev in q["evidence"]):
+        if any(find(ev["quote"], segments.get(ev.get("segment_id", ""), {}).get("text", "")[ev["start"] : ev["end"]]) is None
+               for ev in q["evidence"]):  # rows before questions-v6 have no segment_id: they fail here, and are redone
             moved.append(q["question_id"])
-    types, rejected = Counter(q["type"] for q in questions), Counter(x["reason"] for r in rows for x in r["rejected"])
+    counts = Counter(q["type"] for q in questions)
+    rejected = Counter(reason_group(x["reason"]) for r in rows for x in r["rejected"])
     return [
-        (f"every segment with facts has questions ({QUESTIONS_VERSION})", not todo, f"{len(done)} segments done" + (f"; to do: {todo[:3]}" if todo else "")),
-        ("every question still passes the audit", not failing, f"{len(questions)} questions {dict(types)}" + (f"; failing: {failing[:3]}" if failing else "")),
+        ("question_types.toml is valid", True, f"{len(types)} types: {', '.join(types)}"),
+        (f"every segment with facts has questions ({QUESTIONS_VERSION})", not todo, f"{len(done)} rows done" + (f"; to do: {todo[:3]}" if todo else "")),
+        ("every question still passes the audit", not failing, f"{len(questions)} questions {dict(counts)}" + (f"; failing: {failing[:3]}" if failing else "")),
         ("every evidence quote is at its recorded position", not moved, ", ".join(moved[:3]) or f"the audit rejected {sum(rejected.values())}: {dict(rejected)}"),
     ]
 

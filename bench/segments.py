@@ -94,9 +94,8 @@ def read_toc(file_name: str, toc_text: str) -> list[TocEntry]:
         raw = [TocEntry(**e) for e in cached["entries"]]
     else:
         agent = Agent(llm.model(), output_type=NativeOutput(TocEntries, strict=True), instructions=TOC_PROMPT)
-        result = agent.run_sync(toc_text, model_settings={"max_tokens": 8_000})  # a long TOC needs more than the default cap
-        llm.check_usage(result.usage.input_tokens, toc_text, f"TOC of {file_name}")
-        raw = result.output.entries
+        # a long TOC needs more than the default output cap
+        raw = llm.call("toc", agent, toc_text, file_name, model_settings={"max_tokens": 8_000}).entries
         cache.parent.mkdir(parents=True, exist_ok=True)
         record = {"version": TOC_VERSION, "model": llm.settings().llm_model, "entries": [e.model_dump() for e in raw]}
         cache.write_text(json.dumps(record, indent=1, ensure_ascii=False))
@@ -272,10 +271,31 @@ def parts(segment: dict[str, Any], max_chars: int) -> list[dict[str, Any]]:
         start += cut
     cuts.append((start, len(text)))
     return [
-        {"text": text[s:e].strip(), "heading": heading_path(segment, page_at(segment, s)),
+        {"start": s, "end": e, "text": text[s:e].strip(), "heading": heading_path(segment, page_at(segment, s)),
          "context": text[max(0, s - OVERLAP_CHARS) : s].strip() if s else ""}
         for s, e in cuts
     ]
+
+
+PARAGRAPH = re.compile(r"(?:[^\n]|\n(?![ \t]*\n))+")  # lines up to a blank line
+SENTENCE_END = re.compile(r"[.!?][\"”’)]?\s+(?=[\"“‘(]?[A-Z0-9])")
+NOT_AN_END = re.compile(r"(?:\b(?:e\.g|i\.e|viz|etc|approx|nos?|fig|vs|dr|mr|mrs|ms|st)|(?:^|\s)\d{1,2})\.$", re.I)
+INITIAL = re.compile(r"\b[A-Z]\.$")  # "J. Smith"
+
+
+def sentences(text: str) -> list[dict[str, Any]]:
+    """The text cut into paragraphs (at blank lines) and sentences, each with an id such as 'p3.s2' and
+    its (start, end) in the text. Agents point at these ids and the quote is cut here, never retyped."""
+    found = []
+    for p, para in enumerate((m for m in PARAGRAPH.finditer(text) if m.group().strip()), start=1):
+        cuts = [m.start() + 1 for m in SENTENCE_END.finditer(para.group())
+                if not NOT_AN_END.search(para.group()[: m.start() + 1]) and not INITIAL.search(para.group()[: m.start() + 1])]
+        bounds = [0, *cuts, len(para.group())]
+        for s, (a, b) in enumerate(zip(bounds, bounds[1:]), start=1):
+            piece = para.group()[a:b]
+            start = para.start() + a + len(piece) - len(piece.lstrip())
+            found.append({"id": f"p{p}.s{s}", "start": start, "end": para.start() + a + len(piece.rstrip())})
+    return found
 
 
 def run_segments(refresh: bool = False) -> list[dict[str, Any]]:

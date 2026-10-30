@@ -15,16 +15,20 @@ def test_chunks_cover_the_text_exactly_and_prefer_paragraph_breaks():
 
 
 def test_gold_chunks_are_the_ones_holding_each_quote():
-    chunks = [{"chunk_id": "seg-01:c001", "start": 0, "end": 100}, {"chunk_id": "seg-01:c002", "start": 100, "end": 200}]
-    gold = gold_chunks({"evidence": [{"start": 10, "end": 50}, {"start": 90, "end": 120}]}, chunks)
-    assert gold == [{"seg-01:c001"}, {"seg-01:c001", "seg-01:c002"}]  # a quote across a boundary has two gold chunks
+    chunks = {"seg-01": [{"chunk_id": "seg-01:c001", "start": 0, "end": 100}, {"chunk_id": "seg-01:c002", "start": 100, "end": 200}],
+              "seg-02": [{"chunk_id": "seg-02:c001", "start": 0, "end": 100}]}
+    evidence = [{"segment_id": "seg-01", "start": 10, "end": 50}, {"segment_id": "seg-01", "start": 90, "end": 120},
+                {"segment_id": "seg-02", "start": 10, "end": 50}]
+    gold = gold_chunks({"evidence": evidence}, chunks)
+    # a quote across a boundary has two gold chunks; a fact from another section has that section's chunk
+    assert gold == [{"seg-01:c001"}, {"seg-01:c001", "seg-01:c002"}, {"seg-02:c001"}]
 
 
 def test_stale_evidence_stops_the_evaluation():
-    q = {"question_id": "seg-01:q01", "evidence": [{"quote": "keep her shed clean", "start": 22, "end": 41}]}
-    check_evidence(q, SENT)  # the quote is still where it was verified
+    q = {"question_id": "seg-01:q01", "evidence": [{"segment_id": "seg-01", "quote": "keep her shed clean", "start": 22, "end": 41}]}
+    check_evidence(q, {"seg-01": SENT})  # the quote is still where it was verified
     with pytest.raises(SystemExit):
-        check_evidence(q, "Segment text changed. " + SENT)
+        check_evidence(q, {"seg-01": "Segment text changed. " + SENT})
 
 
 def test_scores():

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "eval-bench",
-    "description": "Look inside the search benchmark: the local Qdrant test bed, every stage's output (via `uv run bench serve`) and the local Ollama models. Everything is read-only and local; no keys are needed. See GUIDE.md.",
+    "description": "Look inside the search benchmark: the local Qdrant test bed, every stage's output (via `uv run bench serve`) and the local Ollama models. Everything is read-only and local; no keys are needed.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -619,6 +619,28 @@
               ]
             },
             "description": "The same checks as `bench check`."
+          }
+        },
+        {
+          "name": "Agent calls: the latest 20",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{bench}}/trace?last=20",
+              "host": [
+                "{{bench}}"
+              ],
+              "path": [
+                "trace"
+              ],
+              "query": [
+                {
+                  "key": "last",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Every agent call as it was made: role, label, prompt, output, tokens and seconds (data/trace.jsonl). Filter with role= (e.g. fact agent) or label= (part of a segment id)."
           }
         },
         {

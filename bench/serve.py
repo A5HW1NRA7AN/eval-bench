@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from bench.agents import FACTS, QUESTIONS
-from bench.checks import PAGES, RESULTS, all_checks
+from bench.checks import RESULTS, all_checks
 from bench.config import DATA_DIR
 from bench.evaluate import REPORT
-from bench.pdf import read_jsonl
+from bench.facts import FACTS
+from bench.llm import TRACE
+from bench.pdf import PAGES, read_jsonl
+from bench.questions import QUESTIONS
 from bench.segments import SEGMENTS, slug
 from bench.testbed import COLLECTION, embed, qdrant
 
@@ -30,6 +32,7 @@ ENDPOINTS = {
     "/results?type=&misses=1": "each question's search result: rank of the first evidence chunk, hit@k, top 5",
     "/report": "the scored report (Markdown)",
     "/checks": "every stage check (same as `bench check`)",
+    "/trace?role=&label=&last=20": "the latest agent calls: role, label, prompt, output, tokens, seconds",
     "/search?q=&k=5": "search the local test bed now: the top k chunks with their text",
 }
 
@@ -77,12 +80,16 @@ def route(path: str, query: dict[str, str]) -> tuple[int, Any]:
         results = [r for r in _load(RESULTS, "evaluate") if _match(r["question_id"], doc)
                    and query.get("type", r["type"]) == r["type"]]
         if query.get("misses"):
-            results = [r for r in results if not r["hit@10"]]
+            results = [r for r in results if r.get("answerable", True) and not r["hit@10"]]  # unanswerable ones have no hits
         return 200, results
     if name == "report":
         return (200, REPORT.read_text()) if REPORT.exists() else (404, {"error": "run `bench evaluate` first"})
     if name == "checks":
         return 200, {stage: [{"check": n, "ok": ok, "detail": d} for n, ok, d in checks] for stage, checks in all_checks().items()}
+    if name == "trace":
+        calls = [t for t in _load(TRACE, "facts") if query.get("role", t["role"]) == t["role"]
+                 and query.get("label", "") in t["label"]]
+        return 200, calls[-int(query.get("last", 20)):]
     if name == "search":
         if not query.get("q"):
             return 400, {"error": "add ?q=<question>"}

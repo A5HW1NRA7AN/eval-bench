@@ -20,6 +20,7 @@ NUMBER = re.compile(r"^[\d.,%()\-–—:/]+$|^NIL$")
 PAGE_NO = re.compile(r"^\d{1,4}\b\s*|\s*\b\d{1,4}$")
 BARE_INT = re.compile(r"^\d{1,4}$")
 YEAR = re.compile(r"^(19|20)\d{2}$")
+PAGES = DATA_DIR / "pages.jsonl"
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -102,7 +103,7 @@ def extract(path: Path) -> list[dict[str, Any]]:
 def load_pages(refresh: bool = False) -> list[dict[str, Any]]:
     """All pages of every PDF in pdfs/, kept in data/pages.jsonl and extracted again when the set of
     PDFs changes (or with refresh, e.g. after replacing a PDF under the same name)."""
-    out = DATA_DIR / "pages.jsonl"
+    out = PAGES
     pdfs = sorted(PDF_DIR.glob("*.pdf"))
     if not pdfs:
         raise SystemExit(f"no PDFs in {PDF_DIR}")
