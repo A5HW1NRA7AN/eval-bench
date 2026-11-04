@@ -1,6 +1,6 @@
 import pymupdf
 
-from bench.pdf import extract, garbled
+from bench.pdf import _box_text, _join, _table_text, extract, garbled, normalize
 
 
 def _pdf(tmp_path, pages=5):
@@ -29,3 +29,16 @@ def test_garbled_flags_ocr_junk_but_not_tables_or_prose():
     assert garbled("0 CL o c — Z3 0 o -O C 3 l— 0 o c 0 0 p - d .3 0 .E " * 5)
     assert not garbled("34 Delhi - 0.00 NIL 0.00 35 Lakshadweep 3188 2865 - 13 " * 8)
     assert not garbled("Give the calf colostrum within two hours of birth for good immunity. " * 6)
+
+
+def test_a_table_is_one_line_per_row_and_empty_rows_go():
+    table = {"extract": [["Year", "Milk\n(MT)"], [None, ""], ["2023-24", "239.30"]]}
+    assert _table_text(table) == "Year | Milk (MT)\n2023-24 | 239.30"
+
+
+def test_text_is_normalized_and_broken_words_and_sentences_are_joined():
+    assert normalize("eﬃcient milk­ production¬ \nrate  high\x07") == "efficient milk production-rate • high"
+    box = {"textlines": [{"spans": [{"text": "milk-"}]}, {"spans": [{"text": "production rises"}]}, {"spans": [{"text": "Next"}]}]}
+    assert _box_text(box) == "milk-production rises\nNext"
+    assert _join(["It rises in", "summer months.", "New block.", "lower case after a stop."]) == \
+        "It rises in\nsummer months.\n\nNew block.\n\nlower case after a stop."

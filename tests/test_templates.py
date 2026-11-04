@@ -5,7 +5,8 @@ from typer.testing import CliRunner
 
 from bench import cli, segments, templates
 from bench.config import BenchError
-from bench.templates import Template, assigned, coverage, fact_intents, templates as load_templates
+from bench.templates import assigned, coverage, fact_intents
+from bench.templates import templates as load_templates
 from bench.verify import SHAPES, not_english, uid
 
 REPO = load_templates()  # the committed templates/ files

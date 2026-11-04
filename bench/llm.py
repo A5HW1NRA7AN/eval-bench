@@ -1,10 +1,13 @@
 """The LLM behind every agent: local Ollama or the remote Gemma 4 endpoint, through one code path.
 
 Every agent call goes through `call`, which shows it live in the terminal and appends it to data/trace.jsonl.
+Answers are cached in data/cache/ by everything that shapes them (model, settings, instructions, schema, prompt),
+so a re-run, or a run after a change, only asks the model what it hasn't been asked before.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -12,7 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
-from pydantic_ai import Agent
+from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -21,8 +24,11 @@ from rich.markup import escape
 from rich.panel import Panel
 
 from bench.config import DATA_DIR, MAX_RETRIES, OUTPUT_TOKENS, REQUEST_TIMEOUT, settings
+from bench.pdf import write_text
 
 TRACE = DATA_DIR / "trace.jsonl"
+CACHE = DATA_DIR / "cache"
+USE_CACHE = True  # `bench --no-cache`: ask the model again (answers are still saved)
 RUN_ID = f"{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}"  # tells runs apart in the trace
 console = Console(highlight=False)
 VERBOSE = False  # `bench --verbose`: also print each prompt and output
@@ -47,6 +53,23 @@ def model() -> OpenAIChatModel:
     return OpenAIChatModel(s.llm_model, provider=provider, profile=PROFILE, settings=model_settings)
 
 
+def agent(output: type[BaseModel], instructions: str) -> Agent[Any, Any]:
+    """An agent that answers in `output`'s JSON schema. It remembers what it was built with, for the cache key."""
+    built = Agent(model(), output_type=NativeOutput(output, strict=True), instructions=instructions)
+    built.bench_spec = (output, instructions)  # type: ignore[attr-defined]
+    return built
+
+
+def cache_key(agent: Agent[Any, Any], prompt: str, model_settings: dict[str, Any] | None) -> str:
+    """Everything that shapes an answer; deadlines and retries don't."""
+    output, instructions = agent.bench_spec  # type: ignore[attr-defined]
+    shaping = {k: v for k, v in {**(agent.model.settings or {}), **(model_settings or {})}.items()
+               if k not in ("request_timeout", "max_retries")}
+    parts = [agent.model.model_name, json.dumps(shaping, sort_keys=True, default=str), instructions,
+             json.dumps(output.model_json_schema(), sort_keys=True), prompt]
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
 def check_usage(input_tokens: int, sent_text: str, label: str) -> None:
     """Warn when the model read far less than we sent: a sign the prompt was truncated."""
     if input_tokens and input_tokens < 0.5 * len(sent_text) / 4.5:
@@ -67,10 +90,23 @@ def _trace(record: dict[str, Any]) -> None:
 
 def call(role: str, agent: Agent[Any, Any], prompt: str, label: str, **kwargs: Any) -> Any:
     """Run one agent call: a spinner while it runs, one line when done, and a record in the trace.
-    A failed call is traced with its error and re-raised."""
+    A cached answer is used when there is one. A failed call is traced with its error and re-raised."""
     started = time.monotonic()
     base = {"time": datetime.now().isoformat(timespec="seconds"), "run": RUN_ID, "role": role, "label": label,
             "model": settings().llm_model}
+    key = cache_key(agent, prompt, kwargs.get("model_settings"))
+    path = CACHE / key[:2] / f"{key}.json"
+    if USE_CACHE and path.exists():
+        try:
+            hit = json.loads(path.read_text())
+            output = agent.bench_spec[0].model_validate(hit["output"])  # type: ignore[attr-defined]
+        except (ValueError, KeyError):  # an unreadable entry is asked again
+            pass
+        else:
+            console.print(f"  [cyan]{role}[/] ▸ {escape(label)} → {_summary(output)} [dim](cached)[/]")
+            _trace({**base, "cached": key, "served_model": hit.get("served_model"), "seconds": 0, "prompt": prompt,
+                    "output": hit["output"]})
+            return output
     try:
         with console.status(f"[cyan]{role}[/] ▸ {escape(label)} …"):
             result = agent.run_sync(prompt, **kwargs)
@@ -86,6 +122,7 @@ def call(role: str, agent: Agent[Any, Any], prompt: str, label: str, **kwargs: A
     if VERBOSE:
         console.print(Panel(prompt, title=f"{role} prompt", border_style="dim"))
         console.print(Panel(json.dumps(output, indent=1, ensure_ascii=False), title=f"{role} output", border_style="cyan"))
+    write_text(path, json.dumps({"served_model": response.model_name, "output": output}, ensure_ascii=False))
     _trace({**base, "served_model": response.model_name, "finish_reason": response.finish_reason,
             "requests": usage.requests, "seconds": round(seconds, 2), "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens, "prompt": prompt, "output": output})

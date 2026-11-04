@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Search-quality benchmark: LLM agents write facts and questions from PDFs, a regex audit checks them, and a local Qdrant test bed is scored."
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "pymupdf>=1.24",
+    "pymupdf==2.0",  # pinned: its layout engine sets every text offset; a new version means a new extraction
+    "pymupdf4llm==2.0",  # the layout engine's JSON (bench/pdf.py)
     "pydantic>=2.12",
     "pydantic-ai-slim[openai]==2.59.0",  # pinned: the Ollama/Gemma settings in bench/llm.py were checked against it
     "qdrant-client>=1.15",

@@ -14,15 +14,16 @@ from openpyxl import Workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from bench.checks import RESULTS, all_checks, reason_group
+from bench.checks import all_checks
 from bench.config import DATA_DIR
-from bench.evaluate import KS, summary, test_set_id
+from bench.evaluate import KS, RESULTS, summary, test_set_id
 from bench.facts import FACTS
 from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl
 from bench.questions import QUESTIONS
 from bench.segments import SEGMENTS
 from bench.testbed import CHUNKS
+from bench.verify import reason_group
 
 WORKBOOK = DATA_DIR / "bench.xlsx"
 CELL_LIMIT = 32_000  # Excel holds at most 32,767 characters in a cell
@@ -134,9 +135,9 @@ def run_export() -> Path:
     _sheet(book, "Results", [
         {"question_id": r["question_id"], "type": r["type"], "question": r["question"], "answerable": r.get("answerable", True),
          "first_rank": r.get("first_rank"), **{f"hit@{k}": r.get(f"hit@{k}") for k in KS}, "rr": r.get("rr"),
-         "all_facts@10": r.get("all_facts@10"), "top_score": r["top"][0][1] if r["top"] else None,
+         "all_facts@10": r.get("all_facts@10"), "top_score": r["top_score"] if r.get("ranked") else None,
          "expected": "\n---\n".join(r["expected"]),
-         **{f"top{n}": f"{score:.3f} {passage(cid)}" for n, (cid, score) in enumerate(r["top"][:3], start=1)}}
+         **{f"top{n}": f"{score:.3f} {passage(cid)}" for n, (cid, score) in enumerate(r["ranked"][:3], start=1)}}
         for r in results], bad=missed)
     if answerable:
         pdf_of = {s["segment_id"]: s["file_name"] for s in segments}

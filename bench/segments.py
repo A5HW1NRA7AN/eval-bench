@@ -6,21 +6,20 @@ tail of the previous part, so it keeps the context of the whole segment.
 
 from __future__ import annotations
 
-import json
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 
 from bench import llm
 from bench.config import DATA_DIR, REQUEST_TIMEOUT, BenchError
-from bench.pdf import load_pages, read_jsonl, write_jsonl, write_text
+from bench.pdf import load_pages, read_jsonl, write_jsonl
 
 SEGMENTS = DATA_DIR / "segments.jsonl"
+INGEST = DATA_DIR / "ingest.jsonl"  # per PDF: page statuses, tables, how the TOC was used, segment sizes
 TOC_SCAN_PAGES = 25  # the printed TOC sits near the front
 ENTRY_LINE = re.compile(r"(\.\s*){4,}|…{2,}|\s\d{1,3}\s*$|^\s*\d{1,3}\s*$")  # dot leaders or a page number
 LEAD = r"^\W*(?:[\divxlc.]+\s+)?"  # titles are matched at their start, after an optional number ("VI GLOSSARY")
@@ -30,7 +29,8 @@ BACK_MATTER = re.compile(LEAD + r"(annexures?|appendix|appendices|references|bib
 OVERLAP_CHARS = 800  # tail of the previous part handed to the next one
 COVER_PAGES = 4  # at most this many unnumbered pages at the end are taken as covers
 MIN_TEXT = 500  # a segment needs at least a paragraph of text to be used for questions
-TOC_VERSION = "toc-v3"  # bump when TOC_PROMPT changes; older caches are re-parsed
+SPLIT_CHARS = 30_000  # a longer top-level segment is cut at its level-2 TOC entries...
+MIN_PIECE = 6_000  # ...into pieces of at least this many characters
 
 TOC_PROMPT = """You turn the text of a PDF's table of contents into JSON. The text comes from a PDF \
 library, so dot leaders, numbers and page numbers may sit on separate lines and long titles may wrap.
@@ -59,7 +59,7 @@ class TocEntries(BaseModel):
 
 def normalize(text: str) -> str:
     """Lowercase, unify quotes and dashes, drop dot leaders, collapse whitespace (for title matching)."""
-    text = text.lower().translate(str.maketrans("‘’“”–—", "''\"\"--"))
+    text = text.lower().translate(str.maketrans("‘’“”–—", "''\"\"--")).replace("&", " and ")
     return " ".join(re.sub(r"(\.\s*){3,}|…+", " ", text).split())
 
 
@@ -86,28 +86,18 @@ def find_toc_pages(pages: list[dict[str, Any]]) -> list[int]:
     return []
 
 
-def read_toc(file_name: str, toc_text: str) -> list[TocEntry]:
-    """Ask the LLM to parse the TOC once. Its raw answer is cached in data/toc/, so re-runs are
-    offline and changes to the checks below never need the LLM again."""
-    cache = DATA_DIR / "toc" / f"{slug(file_name)}.json"
-    try:
-        cached = json.loads(cache.read_text()) if cache.exists() else {}
-        raw = [TocEntry(**e) for e in cached["entries"]] if cached.get("version") == TOC_VERSION else None
-    except (ValueError, KeyError, TypeError):  # an unreadable cache is parsed again
-        raw = None
-    if raw is None:
-        agent = Agent(llm.model(), output_type=NativeOutput(TocEntries, strict=True), instructions=TOC_PROMPT)
-        try:  # a long TOC needs more output, and more time, than the defaults
-            raw = llm.call("toc", agent, toc_text, file_name,
-                           model_settings={"max_tokens": 8_000, "request_timeout": 3 * REQUEST_TIMEOUT}).entries
-        except UnexpectedModelBehavior:
-            raise  # an answer that can't be parsed: segment_pdf falls back to one segment
-        except Exception as exc:  # an outage: saving the whole-PDF fallback would look like a real result
-            raise BenchError(f"{file_name}: the TOC agent failed ({type(exc).__name__}: {exc}). Nothing was saved; "
-                             "re-run `bench segment` when the LLM endpoint is up") from exc
-        record = {"version": TOC_VERSION, "model": llm.settings().llm_model, "entries": [e.model_dump() for e in raw]}
-        write_text(cache, json.dumps(record, indent=1, ensure_ascii=False))
-    return keep_valid(raw, toc_text)
+def read_toc(file_name: str, toc_text: str, dropped: list[str] | None = None) -> list[TocEntry]:
+    """Ask the LLM to parse the TOC (answers are cached by bench/llm.py, so a re-run needs no LLM),
+    then keep only the entries the checks below accept."""
+    try:  # a long TOC needs more output, and more time, than the defaults
+        raw = llm.call("toc", llm.agent(TocEntries, TOC_PROMPT), toc_text, file_name,
+                       model_settings={"max_tokens": 8_000, "request_timeout": 3 * REQUEST_TIMEOUT}).entries
+    except UnexpectedModelBehavior:
+        raise  # an answer that can't be parsed: segment_pdf falls back to one segment
+    except Exception as exc:  # an outage: saving the whole-PDF fallback would look like a real result
+        raise BenchError(f"{file_name}: the TOC agent failed ({type(exc).__name__}: {exc}). Nothing was saved; "
+                         "re-run `bench segment` when the LLM endpoint is up") from exc
+    return keep_valid(raw, toc_text, dropped)
 
 
 def _words(text: str) -> str:
@@ -116,9 +106,19 @@ def _words(text: str) -> str:
     return " " + " ".join(w for w in normalize(text).replace("-", " ").split() if not re.fullmatch(r"[\d.]+", w)) + " "
 
 
-def keep_valid(entries: list[TocEntry], toc_text: str) -> list[TocEntry]:
+def _longest_run(pages: list[int]) -> set[int]:
+    """Indexes of the longest non-decreasing run (not necessarily adjacent) of page numbers."""
+    best: list[list[int]] = []
+    for i, page in enumerate(pages):
+        prior = [b for j, b in enumerate(best) if pages[j] <= page]
+        best.append(max(prior, key=len, default=[]) + [i])
+    return set(max(best, key=len, default=[]))
+
+
+def keep_valid(entries: list[TocEntry], toc_text: str, dropped: list[str] | None = None) -> list[TocEntry]:
     """Entries whose title really is in the TOC text, put back in the text's order (the model can
-    move a line), whose page numbers never go backwards."""
+    move a line), keeping the longest run of page numbers that never goes backwards: one misread number
+    drops only itself. Dropped titles are added to `dropped`."""
     haystack, cursor, taken, found = _words(toc_text), 0, set(), []
     for e in entries:
         needle = _words(e.title)
@@ -134,14 +134,14 @@ def keep_valid(entries: list[TocEntry], toc_text: str) -> list[TocEntry]:
         taken.add(at)
         cursor = max(cursor, at + len(needle) - 1)
         found.append((at, e))
-    kept, last = [], 0
-    for _, e in sorted(found, key=lambda pair: pair[0]):
-        if e.printed_page is not None:
-            if e.printed_page < last:
-                continue
-            last = e.printed_page
-        kept.append(e.model_copy(update={"title": e.title.strip(), "level": max(1, e.level)}))
-    return kept
+    ordered = [e for _, e in sorted(found, key=lambda pair: pair[0])]
+    paged = [i for i, e in enumerate(ordered) if e.printed_page is not None]
+    run = {paged[k] for k in _longest_run([ordered[i].printed_page for i in paged])}
+    if dropped is not None:
+        dropped += [e.title for e in entries if e not in ordered]  # not in the TOC text: invented
+        dropped += [ordered[i].title for i in paged if i not in run]  # a page number out of order
+    return [e.model_copy(update={"title": e.title.strip(), "level": max(1, e.level)})
+            for i, e in enumerate(ordered) if e.printed_page is None or i in run]
 
 
 def label(e: TocEntry) -> str:
@@ -191,15 +191,16 @@ def locate(entries: list[TocEntry], pages: list[dict[str, Any]], after: int) -> 
 
 def _segment(seg_id: str, file_name: str, doc_id: str, title: str, pages: list[dict[str, Any]],
              headings: list[dict[str, Any]], for_questions: bool) -> dict[str, Any]:
-    """Join the clean, non-garbled pages and record where each page sits in the segment text."""
-    texts, spans, pos = [], [], 0
+    """Join the clean, non-garbled pages and record where each page sits in the segment text. A page that
+    ends mid-sentence joins the next one as the same paragraph."""
+    text, spans = "", []
     for p in pages:
         if p["garbled"] or not p["text"].strip():
             continue
-        texts.append(p["text"])
-        spans.append({"page": p["page"], "start": pos, "end": pos + len(p["text"])})
-        pos += len(p["text"]) + 2
-    text = "\n\n".join(texts)
+        if text:
+            text += "\n" if not re.search(r"[.!?:;)\]]\s*$", text) and p["text"].lstrip()[:1].islower() else "\n\n"
+        spans.append({"page": p["page"], "start": len(text), "end": len(text) + len(p["text"])})
+        text += p["text"]
     return {
         "segment_id": seg_id, "doc_id": doc_id, "file_name": file_name, "title": title,
         "pages": [pages[0]["page"], pages[-1]["page"]] if pages else [],
@@ -208,20 +209,50 @@ def _segment(seg_id: str, file_name: str, doc_id: str, title: str, pages: list[d
     }
 
 
-def segment_pdf(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _split(seg_id: str, segment_pages: list[dict[str, Any]], headings: list[dict[str, Any]], make: Any) -> list[dict[str, Any]]:
+    """A top-level segment longer than SPLIT_CHARS, cut at the pages where its level-2 TOC entries start;
+    pieces shorter than MIN_PIECE are merged into the one before. Each piece keeps the parent heading, so its
+    heading path still names the chapter."""
+    top, first = headings[0], segment_pages[0]["page"]
+    cuts = sorted({h["page"] for h in headings[1:] if h["level"] == top["level"] + 1 and h["page"] > first})
+    bounds = [first, *cuts, segment_pages[-1]["page"] + 1]
+    pieces = [[p for p in segment_pages if a <= p["page"] < b] for a, b in zip(bounds, bounds[1:])]
+    merged: list[list[dict[str, Any]]] = []
+    for piece in pieces:
+        if merged and sum(len(p["text"]) for p in piece) < MIN_PIECE:
+            merged[-1] = merged[-1] + piece
+        else:
+            merged.append(piece)
+    if len(merged) < 2:
+        return [make(seg_id, top["title"], segment_pages, headings)]
+    out = []
+    for j, piece in enumerate(merged, start=1):
+        inside = [h for h in headings[1:] if piece[0]["page"] <= h["page"] <= piece[-1]["page"]]
+        title = top["title"] if j == 1 else f"{top['title']} > {inside[0]['title'] if inside else f'part {j}'}"
+        out.append(make(f"{seg_id}-{j}", title, piece, [top, *inside]))
+    return out
+
+
+def segment_pdf(pages: list[dict[str, Any]], report: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Segments of one PDF: front matter, one per top-level TOC entry (or the whole PDF if no TOC),
-    then the covers: unnumbered pages after the last printed page number."""
+    then the covers: unnumbered pages after the last printed page number. A top-level entry longer than
+    SPLIT_CHARS is cut at its level-2 entries. `report` receives how the TOC was used (for data/ingest.jsonl)."""
+    report = {} if report is None else report
     file_name, doc_id, base = pages[0]["file_name"], pages[0]["doc_id"], slug(pages[0]["file_name"])
     numbered = [p["page"] for p in pages if p["printed"] is not None]
     last = numbered[-1] if numbered and len(pages) - numbered[-1] <= COVER_PAGES else len(pages)
-    toc_pages = find_toc_pages(pages)
+    toc_pages, dropped = find_toc_pages(pages), []
     try:
-        entries = read_toc(file_name, "\n".join(pages[n - 1]["raw_text"] for n in toc_pages)) if toc_pages else []
+        entries = read_toc(file_name, "\n".join(pages[n - 1]["raw_text"] for n in toc_pages), dropped) if toc_pages else []
     except UnexpectedModelBehavior as exc:  # an answer that can't be parsed must not stop the other PDFs
         print(f"  {file_name}: TOC could not be parsed ({type(exc).__name__})")
         entries = []
     agreement, placed = locate(entries, pages, toc_pages[-1]) if entries else (0.0, [])
+    unplaced = [e.title for e in entries if e not in [p[0] for p in placed]]
+    report.update({"toc_pages": toc_pages, "toc_entries": len(entries), "placed": len(placed), "agreement": round(agreement, 2),
+                   "dropped_titles": dropped, "unplaced_titles": unplaced})
     if len(placed) < 3 or agreement < 0.5:
+        report["segmented_by"] = "whole PDF (no usable TOC)"
         print(f"  {file_name}: no usable TOC (agreement {agreement:.0%}); one segment for the whole PDF")
         segments = [_segment(f"{base}-01", file_name, doc_id, Path(file_name).stem, pages[:last], [], True)]
         segments.append(_segment(f"{base}-99", file_name, doc_id, "Covers", pages[last:], [], False))
@@ -232,6 +263,7 @@ def segment_pdf(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tops = [i for i, h in enumerate(headings) if h["level"] == top_level]
     first = headings[tops[0]]["page"]
     last = max(last, headings[tops[-1]]["page"])  # the covers never swallow the last entry
+    report["segmented_by"] = "TOC"
     segments = [_segment(f"{base}-00", file_name, doc_id, "Front matter", pages[: first - 1], [], False)] if first > 1 else []
     body_started = body_ended = False
     for k, i in enumerate(tops, start=1):
@@ -242,8 +274,13 @@ def segment_pdf(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         body_ended = body_ended or (body_started and bool(BACK_MATTER.match(title)))
         usable = not body_ended and not BOILERPLATE.search(title)
         body_started = body_started or usable
-        segments.append(_segment(f"{base}-{k:02d}", file_name, doc_id, title, pages[headings[i]["page"] - 1 : end],
-                                 headings[i:nxt], usable))
+        seg_pages = pages[headings[i]["page"] - 1 : end]
+
+        def make(seg_id: str, seg_title: str, piece: list[dict[str, Any]], heads: list[dict[str, Any]], usable: bool = usable) -> dict[str, Any]:
+            return _segment(seg_id, file_name, doc_id, seg_title, piece, heads, usable)
+
+        whole = make(f"{base}-{k:02d}", title, seg_pages, headings[i:nxt])
+        segments += _split(f"{base}-{k:02d}", seg_pages, headings[i:nxt], make) if len(whole["text"]) > SPLIT_CHARS else [whole]
     segments.append(_segment(f"{base}-99", file_name, doc_id, "Covers", pages[last:], [], False))
     return [s for s in segments if s["text"]]  # an entry that shares its page with the next has no text of its own
 
@@ -261,7 +298,8 @@ def heading_path(segment: dict[str, Any], page: int) -> str:
 
 
 def page_at(segment: dict[str, Any], pos: int) -> int:
-    return next((s["page"] for s in segment["page_spans"] if s["start"] <= pos < s["end"] + 2), segment["pages"][0])
+    """The page a position falls on (a separator between pages counts with the page before it)."""
+    return next((s["page"] for s in reversed(segment["page_spans"]) if s["start"] <= pos), segment["pages"][0])
 
 
 def parts(segment: dict[str, Any], max_chars: int) -> list[dict[str, Any]]:
@@ -286,8 +324,10 @@ def parts(segment: dict[str, Any], max_chars: int) -> list[dict[str, Any]]:
 
 
 PARAGRAPH = re.compile(r"(?:[^\n]|\n(?![ \t]*\n))+")  # lines up to a blank line
-SENTENCE_END = re.compile(r"[.!?][\"”’)]?\s+(?=[\"“‘(]?[A-Z0-9])")
-NOT_AN_END = re.compile(r"(?:\b(?:e\.g|i\.e|viz|etc|approx|nos?|fig|vs|dr|mr|mrs|ms|st)|(?:^|\s)\d{1,2})\.$", re.I)
+SENTENCE_END = re.compile(r"[.!?][\"”’)]?\s+(?=[\"“‘(]?[A-Z0-9])|[।॥]\s+")  # also the Hindi danda
+# Not a sentence end: common abbreviations, Indian-English ones (Rs. 1,500; Govt. hospital; Sl. No.) and list numbers.
+NOT_AN_END = re.compile(r"(?:\b(?:e\.g|i\.e|viz|etc|approx|nos?|fig|vs|dr|mr|mrs|ms|st|rs|re|govt|deptt?|sl|sh|smt|pvt|"
+                        r"ltd|distt?|prof|asst|addl|dy|jt|para|sec|vol|al)|(?:^|\s)\d{1,2})\.$", re.I)
 INITIAL = re.compile(r"\b[A-Z]\.$")  # "J. Smith"
 
 
@@ -312,13 +352,20 @@ def run_segments(refresh: bool = False) -> list[dict[str, Any]]:
     by_pdf: dict[str, list[dict[str, Any]]] = {}
     for p in pages:
         by_pdf.setdefault(p["file_name"], []).append(p)
-    segments = []
+    segments, ingest = [], []
     for file_name, pdf_pages in sorted(by_pdf.items()):
-        found = segment_pdf(sorted(pdf_pages, key=lambda p: p["page"]))
+        report: dict[str, Any] = {}
+        ordered = sorted(pdf_pages, key=lambda p: p["page"])
+        found = segment_pdf(ordered, report)
         usable = sum(s["use_for_questions"] for s in found)
         print(f"{file_name}: {len(found)} segments ({usable} used for questions)")
         segments += found
+        ingest.append({"file_name": file_name, "doc_id": ordered[0]["doc_id"], "pages": len(ordered),
+                       "status": dict(Counter(p.get("status", "garbled" if p["garbled"] else "text") for p in ordered)),
+                       "tables": sum(p.get("tables", 0) for p in ordered), **report, "segments": len(found),
+                       "used_for_questions": usable, "largest_segment_chars": max((len(s["text"]) for s in found), default=0)})
     write_jsonl(SEGMENTS, segments)
+    write_jsonl(INGEST, ingest)
     return segments
 
 

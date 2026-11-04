@@ -7,7 +7,14 @@ from pydantic_ai.models.function import FunctionModel
 from bench import facts
 from bench.config import question_types
 from bench.segments import sentences
-from bench.verify import claim_problem, find, numbers, question_problem, size_of, verify_facts
+from bench.verify import (
+    claim_problem,
+    find,
+    numbers,
+    question_problem,
+    size_of,
+    verify_facts,
+)
 
 TEXT = ("Milking animals should be fed 2 kg of compound cattle feed.\n\nIn addition to this quantity, 1 kg "
         "compound cattle feed and 1 kg good quality oil cake should\nalso be given to pregnant animals during the "
@@ -154,7 +161,7 @@ def test_fact_stage_plans_extracts_reviews_and_audits(tmp_path, monkeypatch):
     # the reviewer's flag doesn't remove the repeat: the regex audit rejects it ("not here" named no paragraph of the part)
     (repeat,) = row["rejected"]
     assert repeat["reason"] == "overlaps book-01:f01" and repeat["review"] == {"verdict": "flag", "reason": "repeats f1"}
-    assert repeat["decided_by"] == "audit" and fact["uid"] and row["fingerprint"] == facts.fingerprint(SEGMENT, facts.MAX_FACTS)
+    assert repeat["decided_by"] == "audit" and fact["uid"] and row["fingerprint"] == facts.fingerprint(SEGMENT, facts.fact_budget(SEGMENT))
     facts.run_facts()  # resumes: the segment is already done, nothing changes
     assert len((tmp_path / "facts.jsonl").read_text().splitlines()) == 1
     (tmp_path / "facts.jsonl").write_text(json.dumps({**row, "fingerprint": "made-by-older-prompts", "facts": []}))
@@ -177,3 +184,11 @@ def test_facts_are_asked_for_evenly_across_parts(tmp_path, monkeypatch):
     # an even share each, plus what earlier parts didn't find; part 2 only holds the end of a sentence
     # that part 1 already showed, so it is skipped and its share moves on to part 3
     assert asked == [3, 10]
+    row = json.loads((tmp_path / "facts.jsonl").read_text())
+    assert row["max_facts_from"] == "option" and facts.fact_budget(SEGMENT, row) == 10  # an explicit --max-facts sticks
+
+
+def test_the_fact_budget_grows_with_length_between_a_floor_and_a_cap():
+    budget = lambda chars: facts.fact_budget({"text": "x" * chars})
+    assert (budget(100), budget(30_000), budget(10**6)) == (facts.MIN_FACTS, round(30_000 / facts.FACT_CHARS), facts.MAX_FACTS)
+    assert facts.fact_budget({"text": "x" * 100}, {"max_facts": 7, "max_facts_from": "length"}) == facts.MIN_FACTS  # recomputed

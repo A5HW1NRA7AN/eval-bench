@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from bench.checks import RESULTS, all_checks
+from bench.checks import all_checks
 from bench.config import DATA_DIR
-from bench.evaluate import REPORT
+from bench.evaluate import REPORT, RESULTS
 from bench.facts import FACTS
 from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl
@@ -24,7 +24,6 @@ from bench.testbed import COLLECTION, embed, qdrant
 
 ENDPOINTS = {
     "/pages?doc=&page=": "one page: clean text, raw text, printed page number, junk-OCR flag",
-    "/toc": "each PDF's table of contents as the TOC agent parsed it (data/toc/)",
     "/segments?doc=": "segments without their text: title, pages, used for questions, size",
     "/segments/<segment_id>": "one segment with its text, page map and TOC headings",
     "/facts?doc=&segment=": "the fact agent's output per segment: verified facts and rejected ones with reasons",
@@ -60,8 +59,6 @@ def route(path: str, query: dict[str, str]) -> tuple[int, Any]:
         return (200, pages[:1]) if pages and "page" in query else (200, [
             {"file_name": p["file_name"], "page": p["page"], "printed": p["printed"], "garbled": p["garbled"],
              "chars": len(p["text"])} for p in pages])
-    if name == "toc":
-        return 200, {f.stem: json.loads(f.read_text()) for f in sorted((DATA_DIR / "toc").glob("*.json"))}
     if name == "segments":
         segments = _load(SEGMENTS, "segment")
         if rest:

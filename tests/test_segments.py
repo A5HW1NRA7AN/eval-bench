@@ -1,6 +1,17 @@
 from bench import segments
-from bench.segments import (BOILERPLATE, TocEntry, heading_path, keep_valid, label, locate, normalize, parts, segment_pdf,
-                            sentences)
+from bench.segments import (
+    BOILERPLATE,
+    TocEntry,
+    heading_path,
+    keep_valid,
+    label,
+    locate,
+    normalize,
+    page_at,
+    parts,
+    segment_pdf,
+    sentences,
+)
 
 SENT = "Give the calf colostrum within two hours of birth for good immunity. "  # 69 chars
 
@@ -65,7 +76,7 @@ def test_segments_follow_top_level_entries_and_mark_boilerplate(monkeypatch):
            TocEntry(number="1.1", title="Indigenous breeds", printed_page=3, level=2),
            TocEntry(number="Annexure-I", title="Semen Banks", printed_page=8, level=1),
            TocEntry(number="SECTION-I", title="Milk tables", printed_page=12, level=1)]  # after an annexure: back matter
-    monkeypatch.setattr(segments, "read_toc", lambda name, text: toc)
+    monkeypatch.setattr(segments, "read_toc", lambda name, text, dropped=None: toc)
     found = segment_pdf(pages)
     assert [(s["title"], s["pages"], s["use_for_questions"]) for s in found] == [
         ("Front matter", [1, 8], False), ("1 Breeds of Cattle", [9, 15], True), ("Annexure-I Semen Banks", [16, 19], False),
@@ -80,7 +91,7 @@ def test_big_segments_split_at_paragraphs_with_context_and_headings(monkeypatch)
     toc = [TocEntry(number="1", title="Breeds of Cattle", printed_page=1, level=1),
            TocEntry(number="1.1", title="Indigenous breeds", printed_page=3, level=2),
            TocEntry(number="2", title="Housing", printed_page=40, level=1)]
-    monkeypatch.setattr(segments, "read_toc", lambda name, text: toc)
+    monkeypatch.setattr(segments, "read_toc", lambda name, text, dropped=None: toc)
     pages[2]["raw_text"] = "Contents\n" + "\n".join(f"Entry {i} ........ {i}" for i in range(10))
     seg = next(s for s in segment_pdf(pages) if s["title"] == "1 Breeds of Cattle")
     cut = parts(seg, max_chars=700)
@@ -119,3 +130,43 @@ def test_sentences_are_numbered_by_paragraph_and_point_into_the_text():
     assert cut["p1.s1"] == "1. \nWhat is the limit?"  # a list number is not a sentence end
     assert cut["p2.s1"] == "BIS has set 20 µg/kg (ppb) for feed, e.g. cattle feed."  # nor is "e.g."
     assert cut["p2.s3"] == "Dr. Rao agrees." and cut["p3.s2"] == "Clearance takes 4 days."
+
+
+def test_one_misread_page_number_drops_only_that_entry():
+    toc = "1 Breeds 1\n2 Feeding 5\n3 Housing & Hygiene 900\n4 Health 9\n5 Records 14"
+    entries = [TocEntry(number=str(n), title=t, printed_page=p, level=1)
+               for n, (t, p) in enumerate([("Breeds", 1), ("Feeding", 5), ("Housing and Hygiene", 900), ("Health", 9),
+                                           ("Records", 14)], start=1)]
+    dropped = []
+    assert [e.title for e in keep_valid(entries, toc, dropped)] == ["Breeds", "Feeding", "Health", "Records"]
+    assert dropped and "Housing" in dropped[0]  # "&" in the TOC matches "and" in the parse
+
+
+def test_indian_abbreviations_do_not_end_a_sentence_but_a_danda_does():
+    text = "Pay Rs. 500 to the Govt. of India through the Distt. office. Then wait.\n\nपहला वाक्य। दूसरा वाक्य।"
+    assert [text[s["start"] : s["end"]] for s in sentences(text)] == [
+        "Pay Rs. 500 to the Govt. of India through the Distt. office.", "Then wait.", "पहला वाक्य।", "दूसरा वाक्य।"]
+
+
+def test_page_at_counts_a_separator_with_the_page_before():
+    seg = {"pages": [3, 4], "page_spans": [{"page": 3, "start": 0, "end": 10}, {"page": 4, "start": 12, "end": 20}]}
+    assert [page_at(seg, pos) for pos in (0, 9, 11, 12, 19)] == [3, 3, 3, 4, 4]
+
+
+def test_a_long_chapter_is_split_at_its_sections_and_small_pieces_merge(monkeypatch):
+    pages = _pages(headings={9: "Breeds of Cattle", 11: "Exotic breeds", 12: "Crossbreds", 16: "Buffaloes", 22: "Housing"})
+    pages[2]["raw_text"] = "Contents\n" + "\n".join(f"Entry {i} ........ {i}" for i in range(10))
+    toc = [TocEntry(number="1", title="Breeds of Cattle", printed_page=1, level=1),
+           TocEntry(number="1.1", title="Exotic breeds", printed_page=3, level=2),
+           TocEntry(number="1.2", title="Crossbreds", printed_page=4, level=2),
+           TocEntry(number="1.3", title="Buffaloes", printed_page=8, level=2),
+           TocEntry(number="2", title="Housing", printed_page=14, level=1)]
+    monkeypatch.setattr(segments, "read_toc", lambda name, text, dropped=None: toc)
+    monkeypatch.setattr(segments, "SPLIT_CHARS", 1_000)
+    monkeypatch.setattr(segments, "MIN_PIECE", 300)  # one page holds ~220 characters
+    report = {}
+    found = {s["segment_id"]: (s["title"], s["pages"]) for s in segment_pdf(pages, report) if s["title"].startswith("1 ")}
+    assert found == {"book-01-1": ("1 Breeds of Cattle", [9, 11]),  # the one-page "Exotic breeds" merges into it
+                     "book-01-2": ("1 Breeds of Cattle > 1.2 Crossbreds", [12, 15]),
+                     "book-01-3": ("1 Breeds of Cattle > 1.3 Buffaloes", [16, 21])}
+    assert report["segmented_by"] == "TOC" and report["agreement"] == 1.0 and report["placed"] == 5

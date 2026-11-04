@@ -12,7 +12,7 @@ from typing import Any
 import typer
 
 from bench import config
-from bench.config import MAX_FACTS, BenchError
+from bench.config import FACT_CHARS, MAX_FACTS, MIN_FACTS, BenchError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 DOC = typer.Option(None, help="Only PDFs whose file name contains this text")
@@ -60,11 +60,13 @@ def _command(writes: bool = False) -> Callable[[Callable[..., Any]], Callable[..
 
 
 @app.callback()
-def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Also print each agent's prompt and output")) -> None:
-    """Search-quality benchmark. Every agent call is shown as it runs and saved to data/trace.jsonl."""
+def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Also print each agent's prompt and output"),
+         no_cache: bool = typer.Option(False, "--no-cache", help="Ask the model again instead of using cached answers")) -> None:
+    """Search-quality benchmark. Every agent call is shown as it runs and saved to data/trace.jsonl;
+    answers are cached in data/cache/."""
     from bench import llm
 
-    llm.VERBOSE = verbose
+    llm.VERBOSE, llm.USE_CACHE = verbose, not no_cache
 
 
 @app.command()
@@ -78,7 +80,7 @@ def segment(refresh: bool = typer.Option(False, help="Re-extract page text from 
 
 @app.command()
 @_command(writes=True)
-def facts(doc: str = DOC, max_facts: int = typer.Option(None, help=f"Facts per segment (default: each segment's last value, {MAX_FACTS} for new ones)"),
+def facts(doc: str = DOC, max_facts: int = typer.Option(None, help=f"Facts per segment (default: one per {FACT_CHARS:,} characters, {MIN_FACTS}-{MAX_FACTS})"),
           force: bool = FORCE) -> None:
     """2. Extract facts per segment and keep those whose quote is in the PDF -> data/facts.jsonl."""
     from bench.facts import run_facts
@@ -240,7 +242,13 @@ def templates_coverage() -> None:
     from bench.pdf import write_text
     from bench.questions import QUESTIONS
     from bench.segments import load_segments
-    from bench.templates import COVERAGE, coverage, coverage_report, load_topics, templates
+    from bench.templates import (
+        COVERAGE,
+        coverage,
+        coverage_report,
+        load_topics,
+        templates,
+    )
 
     tmpls = templates()
     rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics())

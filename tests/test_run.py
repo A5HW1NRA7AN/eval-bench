@@ -62,7 +62,12 @@ def test_bench_run_end_to_end(book):
     (scored,) = [json.loads(line) for line in (config.DATA_DIR / "results.jsonl").read_text().splitlines()]
     assert scored["uid"] and scored["first_rank"] == 1  # the fake embedding finds the colostrum chunk first
     report = (config.DATA_DIR / "report.md").read_text()
-    assert "| direct | 1 |" in report and "test set `" in report and (config.DATA_DIR / "bench.xlsx").exists()
+    assert "| direct | 1 |" in report and "| book.pdf | 1 |" in report and (config.DATA_DIR / "bench.xlsx").exists()
+    (run,) = (config.DATA_DIR / "runs").iterdir()  # the run is kept with what it scored
+    manifest, stats = (json.loads((run / name).read_text()) for name in ("manifest.json", "stats.json"))
+    assert manifest["test_set"] in report and manifest["pdfs"][0][0] == "book.pdf" and len(scored["ranked"]) >= 1
+    assert stats["questions"]["kept"] == {"direct": 1} and stats["retrieval"]["by_type"][0]["n"] == 1
+    assert {p.name for p in run.iterdir()} >= {"facts.jsonl", "questions.jsonl", "results.jsonl", "report.md"}
 
     calls = len((config.DATA_DIR / "trace.jsonl").read_text().splitlines())
     assert CliRunner().invoke(cli.app, ["run"]).exit_code == 0  # a second run resumes: no agent call
@@ -104,7 +109,7 @@ def test_a_toc_outage_saves_nothing_but_an_unreadable_toc_falls_back(book, monke
     monkeypatch.setattr(segments.llm, "call", outage)
     with pytest.raises(BenchError, match="Nothing was saved"):
         segments.segment_pdf(pages)
-    assert not (config.DATA_DIR / "toc").exists()  # no cache written
+    assert not (config.DATA_DIR / "cache").exists()  # no answer cached
 
     def garbage(*args, **kwargs):
         raise UnexpectedModelBehavior("not JSON")

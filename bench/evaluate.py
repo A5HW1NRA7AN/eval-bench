@@ -3,23 +3,36 @@
 Gold chunks are the chunks that overlap a question's verified quotes (same segment offsets), so no
 fuzzy matching or LLM judging is needed. Unanswerable questions have no evidence; they are reported apart,
 by how confident the search was. Questions are never dropped because of these results.
+
+Each run is kept in data/runs/<run>/: the facts, questions and results it scored (with every question's top
+RANKED chunks), the report, a manifest of what was run and stats.json (generation and retrieval numbers).
 """
 
 from __future__ import annotations
 
+import json
 import math
+import shutil
 import statistics
-from collections import defaultdict
+import subprocess
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from bench.config import DATA_DIR, BenchError, question_types, settings
-from bench.pdf import read_jsonl, write_jsonl
+from bench import llm
+from bench.config import DATA_DIR, ROOT, BenchError, question_types, settings
+from bench.facts import FACTS
+from bench.pdf import PAGES, read_jsonl, write_jsonl, write_text
 from bench.questions import QUESTIONS, QUESTIONS_VERSION
-from bench.testbed import COLLECTION, embed, load_chunks, qdrant, search
-from bench.verify import find, uid
+from bench.testbed import CHUNK_CHARS, COLLECTION, embed, load_chunks, qdrant, search
+from bench.verify import find, reason_group, uid
 
 KS = (1, 3, 5, 10)
+RANKED = 100  # chunks kept per question, so later metrics need no new search
 REPORT = DATA_DIR / "report.md"
+RESULTS = DATA_DIR / "results.jsonl"
+RUNS = DATA_DIR / "runs"
 SMALL = 30  # groups with fewer questions are marked: their scores move a lot from run to run
 
 
@@ -84,6 +97,62 @@ def test_set_id(questions: list[dict[str, Any]]) -> str:
     return uid(sorted(q.get("uid", "") for q in questions))
 
 
+def _git() -> str:
+    """The commit the code was at, marked when files were changed since (read-only git)."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True)
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "bench", "templates", "question_types.toml"],
+                               cwd=ROOT, capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return head.stdout.strip() + ("+changes" if dirty.stdout.strip() else "")
+
+
+def stats(fact_rows: list[dict[str, Any]], question_rows: list[dict[str, Any]], results: list[dict[str, Any]]) -> dict[str, Any]:
+    """The run's numbers: what the audit kept and rejected (by rule), the AI flags, and the scores with intervals."""
+    def counts(rows: list[dict[str, Any]], field: str, by: str | None) -> dict[str, Any]:
+        items = [x for r in rows for x in r[field]]
+        if by is None:
+            return dict(Counter(reason_group(x["reason"]) for x in items).most_common()) if field == "rejected" else {"n": len(items)}
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for x in items:
+            groups[x.get(by, "?")].append(x)
+        return {k: dict(Counter(reason_group(x["reason"]) for x in v).most_common()) if field == "rejected" else len(v)
+                for k, v in sorted(groups.items())}
+
+    flagged = lambda rows, field: sum(x.get("review", {}).get("verdict") == "flag" for r in rows for x in r[field])
+    answerable = [r for r in results if r["answerable"]]
+    return {
+        "facts": {"sections": len(fact_rows), "kept": counts(fact_rows, "facts", None)["n"],
+                  "rejected": counts(fact_rows, "rejected", None), "ai_flags": flagged(fact_rows, "facts")},
+        "questions": {"kept": counts(question_rows, "questions", "type"), "rejected": counts(question_rows, "rejected", "type"),
+                      "ai_flags": flagged(question_rows, "questions")},
+        "retrieval": {"by_type": with_intervals(summary(answerable, "type")),
+                      "by_document": with_intervals(summary(answerable, "document"))},
+    }
+
+
+def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]], results: list[dict[str, Any]]) -> Path:
+    """Keep this run: its inputs, results and report, a manifest and stats.json, in data/runs/<run>/."""
+    folder = RUNS / llm.RUN_ID
+    folder.mkdir(parents=True, exist_ok=True)
+    for path in (FACTS, QUESTIONS, RESULTS, REPORT):
+        shutil.copy2(path, folder / path.name)
+    pages = read_jsonl(PAGES)
+    manifest = {
+        "run": llm.RUN_ID, "time": datetime.now().isoformat(timespec="seconds"), "code": _git(),
+        "test_set": test_set_id(questions), "questions": len(questions),
+        "question_models": sorted({row["model"] for row in question_rows}),
+        "test_bed": {"collection": COLLECTION, "embed_model": settings().embed_model, "chunk_chars": CHUNK_CHARS,
+                     "ranked": RANKED},
+        "pdfs": sorted({(p["file_name"], p["doc_id"]) for p in pages}),
+        "question_types": {name: t["count"] for name, t in question_types().items()},
+    }
+    write_text(folder / "manifest.json", json.dumps(manifest, indent=1, ensure_ascii=False))
+    write_text(folder / "stats.json", json.dumps(stats(read_jsonl(FACTS), question_rows, results), indent=1, ensure_ascii=False))
+    return folder
+
+
 def _table(rows: list[dict[str, Any]]) -> list[str]:
     head = list(rows[0])
     lines = ["| " + " | ".join(head) + " |", "|---" * len(head) + "|"]
@@ -114,6 +183,7 @@ def run_evaluate() -> None:
     chunks_by_segment: dict[str, list[dict]] = defaultdict(list)
     for c in chunks:
         chunks_by_segment[c["segment_id"]].append(c)
+    by_segment_file = {c["segment_id"]: c["file_name"] for c in chunks}
     if not questions:
         raise BenchError("no verified questions: run `bench facts` and `bench questions` first")
     # chunks cover their segment exactly, so joined they are the indexed segment text
@@ -124,13 +194,15 @@ def run_evaluate() -> None:
     client, vectors = qdrant(), embed([q["question"] for q in questions])
     results = []
     for q, vector in zip(questions, vectors):
-        hits = search(client, vector, max(KS))
-        found = {"top": hits[:5], "top_score": hits[0][1] if hits else 0.0}
+        hits = search(client, vector, RANKED)
+        found = {"ranked": hits, "top_score": hits[0][1] if hits else 0.0}
         if q["evidence"]:
             found |= score([cid for cid, _ in hits], gold_chunks(q, chunks_by_segment))
-        results.append({"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "question": q["question"],
-                        "answerable": bool(q["evidence"]), "expected": [ev["quote"] for ev in q["evidence"]], **found})
-    write_jsonl(DATA_DIR / "results.jsonl", results)
+        document = by_segment_file.get(q["evidence"][0]["segment_id"], "?") if q["evidence"] else "none"
+        results.append({"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "document": document,
+                        "question": q["question"], "answerable": bool(q["evidence"]),
+                        "expected": [ev["quote"] for ev in q["evidence"]], **found})
+    write_jsonl(RESULTS, results)
     answerable = [r for r in results if r["answerable"]]
 
     models = ", ".join(f"`{m}`" for m in sorted({row["model"] for row in rows}))
@@ -141,6 +213,8 @@ def run_evaluate() -> None:
         "question's evidence quote is in the top k. rr: 1 / rank of the first such chunk (MRR@10 when averaged). "
         f"95%: Wilson interval; groups with fewer than {SMALL} questions are marked n<{SMALL}.", "",
         *_table(with_intervals(summary(answerable, "type"))), "",
+        "By the document holding the evidence:", "",
+        *_table(with_intervals(summary(answerable, "document"))), "",
     ]
     if empty := sorted(set(question_types()) - {q["type"] for q in questions}):
         lines += [f"Switched-on types with no kept question: {', '.join(empty)}.", ""]
@@ -159,7 +233,8 @@ def run_evaluate() -> None:
         lines += [f"### {r['question_id']} ({r['type']})", f"- Question: {r['question']}"]
         lines += [f"- Expected: \"{quote}\"" for quote in r["expected"]]
         lines += [f"  {n}. {score_:.3f} {by_id[cid]['file_name']} p{by_id[cid]['pages'][0]}: {' '.join(by_id[cid]['text'].split())[:160]}…"
-                  for n, (cid, score_) in enumerate(r["top"][:3], start=1)]
+                  for n, (cid, score_) in enumerate(r["ranked"][:3], start=1)]
         lines.append("")
-    REPORT.write_text("\n".join(lines))
-    print(f"scored {len(results)} questions -> {REPORT}")
+    write_text(REPORT, "\n".join(lines))
+    folder = save_run(questions, rows, results)
+    print(f"scored {len(results)} questions -> {REPORT}; run kept in {folder.relative_to(DATA_DIR.parent)}")

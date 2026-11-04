@@ -51,6 +51,12 @@ SHAPES = {
 }
 
 
+def reason_group(reason: str) -> str:
+    """One name per audit rule: '"goats" is in the library…' and 'needs 2-5 words, has 9' lose their specifics."""
+    rule = re.sub(r"^overlaps .*", "overlaps a kept fact", reason.split(":")[0])
+    return re.sub(r"\d+", "N", re.sub(r'"[^"]*"', "a term", rule))
+
+
 def has_shape(names: list[str], text: str) -> bool:
     """True if the text holds an answer of at least one of the named shapes."""
     return any(SHAPES[n].search(text) for n in names)

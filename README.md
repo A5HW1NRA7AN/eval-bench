@@ -14,7 +14,7 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
          └──evaluate─► each question searched; a hit = a chunk overlapping its verified quote → report.md
 ```
 
-1. **segment**: page text is cleaned (running headers, page numbers, stray glyphs, junk OCR pages). An agent reads each PDF's printed table of contents. Its entries are checked against the TOC text and kept in the TOC's order, then located in the body to find the page offset. An entry printed without a page number starts at the page where its title stands as a heading, or is dropped if there is none. Each top-level entry becomes a segment, and every page belongs to exactly one segment. Junk OCR pages are left out of the text. Not used for questions, though still indexed:
+1. **segment**: page text comes from PyMuPDF's layout engine, in reading order, with tables written one row per line under their headers. Running headers, page numbers, stray glyphs and junk OCR pages are removed, and every page gets a status (text, image only, garbled, broken font, blank). An agent reads each PDF's printed table of contents. Its entries are checked against the TOC text and kept in the TOC's order, then located in the body to find the page offset. An entry printed without a page number starts at the page where its title stands as a heading, or is dropped if there is none. Each top-level entry becomes a segment (one longer than 30,000 characters is cut at its sections), and every page belongs to exactly one segment. Junk OCR pages are left out of the text. Not used for questions, though still indexed:
    - front matter;
    - boilerplate sections (preface, abbreviations…);
    - the back matter: everything from the first annexure, references, glossary or index after the body;
@@ -74,7 +74,7 @@ Or one stage at a time:
 
 ```
 uv run bench segment          # new or removed PDFs are picked up; --refresh re-reads them all
-uv run bench facts            # --max-facts 10, --doc <part of a file name>, --force to redo
+uv run bench facts            # one fact per 3,000 characters (3-15 per segment); --max-facts N, --doc <part of a file name>, --force
 uv run bench questions        # --doc, --force; types and counts in question_types.toml
 uv run bench index
 uv run bench evaluate
@@ -89,7 +89,7 @@ uv run bench serve            # a read-only JSON API over every stage's output o
 uv run bench --verbose facts  # any stage, also printing each agent's prompt and answer
 ```
 
-Every agent call is shown live in the terminal: what it worked on, what it returned, its time and tokens. Each audit verdict is shown too, with the reason for every rejection. Every call is also saved to `data/trace.jsonl`.
+Every agent call is shown live in the terminal: what it worked on, what it returned, its time and tokens. Each audit verdict is shown too, with the reason for every rejection. Every call is also saved to `data/trace.jsonl`, and its answer is cached in `data/cache/`, so a re-run (or a run after a change) only asks the model what it hasn't been asked before. `bench --no-cache <stage>` asks again.
 
 Import `postman/eval-bench.postman_collection.json` into Postman. It holds requests for three things:
 - the local Qdrant: browse chunks, filter by PDF or segment, and run a two-step semantic search;
@@ -127,13 +127,15 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 
 | File | What it holds |
 |---|---|
-| `pages.jsonl` | cleaned text of every PDF page |
-| `toc/<slug>.json` | the parsed table of contents, named after the PDF in lower case with dashes (cached, so re-runs skip the LLM) |
+| `pages.jsonl` | cleaned text of every PDF page, with its status and table count |
+| `ingest.jsonl` | per PDF: page statuses, tables, how the TOC was used (agreement, dropped titles), segment sizes |
 | `segments.jsonl` | segments with their text, page map and TOC headings |
 | `facts.jsonl` | per segment: verified facts (with position and pages) and rejected ones (with reasons) |
 | `questions.jsonl` | per segment: verified questions, each with its evidence (quotes and positions), and rejected ones |
 | `chunks.jsonl` | the test-bed chunks stored in Qdrant |
-| `results.jsonl`, `report.md` | per-question results and the scored report |
+| `results.jsonl`, `report.md` | per-question results (the top 100 chunks) and the scored report, per type and per document |
+| `runs/<run>/` | each `bench evaluate`: the facts, questions, results and report it scored, `manifest.json` (code, models, test set, PDFs) and `stats.json` (audit rejections by rule, AI flags, scores) |
+| `cache/` | every LLM answer, keyed by model, settings, instructions, schema and prompt |
 | `topics.json`, `coverage.md` | your template overrides and switches; the template coverage report |
 | `trace.jsonl` | every agent call: role, prompt, output, tokens, seconds |
 | `bench.xlsx` | all of the above as readable sheets (`bench export`) |

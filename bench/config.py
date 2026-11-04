@@ -18,7 +18,9 @@ DATA_DIR = ROOT / "data"
 
 QUESTION_TYPES = ROOT / "question_types.toml"
 
-MAX_FACTS = 10  # per segment
+FACT_CHARS = 3_000  # a segment gets one fact per this many characters of text...
+MIN_FACTS = 3  # ...but at least this many...
+MAX_FACTS = 15  # ...and at most this many
 PART_CHARS = 12_000  # the fact agent reads a segment in parts this size, so its facts cover all of it
 OUTPUT_TOKENS = 4096  # cap on each LLM answer
 REQUEST_TIMEOUT = 300  # seconds: one deadline per LLM request, across the SDK's retries

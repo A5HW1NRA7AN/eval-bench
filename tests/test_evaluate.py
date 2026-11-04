@@ -1,7 +1,6 @@
 import pytest
 
 from bench.config import BenchError
-
 from bench.evaluate import check_evidence, gold_chunks, score
 from bench.testbed import CHUNK_CHARS, chunk
 

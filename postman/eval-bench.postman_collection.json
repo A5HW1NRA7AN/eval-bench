@@ -425,22 +425,6 @@
           }
         },
         {
-          "name": "TOC agent: parsed tables of contents",
-          "request": {
-            "method": "GET",
-            "url": {
-              "raw": "{{bench}}/toc",
-              "host": [
-                "{{bench}}"
-              ],
-              "path": [
-                "toc"
-              ]
-            },
-            "description": "The LLM's TOC parse per PDF, as cached in data/toc/."
-          }
-        },
-        {
           "name": "Segments of a PDF",
           "request": {
             "method": "GET",

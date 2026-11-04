@@ -22,13 +22,21 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, NativeOutput
+from pydantic_ai import Agent
 from rich.markup import escape
 
 from bench import llm
-from bench.config import DATA_DIR, MAX_FACTS, MAX_FAILURES, PART_CHARS, BenchError
+from bench.config import (
+    DATA_DIR,
+    FACT_CHARS,
+    MAX_FACTS,
+    MAX_FAILURES,
+    MIN_FACTS,
+    PART_CHARS,
+    BenchError,
+)
 from bench.pdf import read_jsonl, write_jsonl
-from bench.segments import load_segments, parts, sentences
+from bench.segments import heading_path, load_segments, page_at, parts, sentences
 from bench.verify import kept_fact_problem, span_of, uid, verify_facts
 
 FACTS = DATA_DIR / "facts.jsonl"
@@ -97,6 +105,16 @@ class Review(BaseModel):
 
 class Reviews(BaseModel):
     reviews: list[Review]
+
+
+def fact_budget(segment: dict[str, Any], row: dict[str, Any] | None = None, max_facts: int | None = None) -> int:
+    """How many facts a segment gets: --max-facts if given, else the number a row was made with by --max-facts,
+    else one per FACT_CHARS characters of text, between MIN_FACTS and MAX_FACTS. Shared by the run and the checks."""
+    if max_facts:
+        return max_facts
+    if row and row.get("max_facts_from") == "option":
+        return row["max_facts"]
+    return min(MAX_FACTS, max(MIN_FACTS, round(len(segment["text"]) / FACT_CHARS)))
 
 
 def load_rows(path: Path) -> dict[str, dict[str, Any]]:
@@ -226,20 +244,18 @@ def still_valid(row: dict[str, Any], segment: dict[str, Any]) -> bool:
 
 
 def run_facts(doc: str | None = None, max_facts: int | None = None, force: bool = False) -> None:
-    """Facts for each segment, read in parts that remember the facts found so far.
-    Given a whole chapter the model only takes facts from its first pages, so each part gets an
-    even share of max_facts (plus any shortfall of the parts before it). Without max_facts, each segment
-    keeps the limit its row was made with (MAX_FACTS for a new one), so `bench run` and `bench check` agree."""
+    """Facts for each segment, read in parts that remember the facts found so far. A segment's fact budget
+    grows with its length (fact_budget). Given a whole chapter the model only takes facts from its first pages,
+    so each part gets an even share of the budget (plus any shortfall of the parts before it)."""
     if max_facts is not None and max_facts < 1:
         raise BenchError("--max-facts must be at least 1")
-    done, model = load_rows(FACTS), llm.model()
+    done = load_rows(FACTS)
 
     def limit(segment: dict[str, Any]) -> int:
-        return max_facts or done.get(segment["segment_id"], {}).get("max_facts", MAX_FACTS)
+        return fact_budget(segment, done.get(segment["segment_id"]), max_facts)
 
-    planner = Agent(model, output_type=NativeOutput(Topics, strict=True), instructions=PLANNER_PROMPT)
-    extractor = Agent(model, output_type=NativeOutput(Pointers, strict=True), instructions=EXTRACTOR_PROMPT)
-    reviewer = Agent(model, output_type=NativeOutput(Reviews, strict=True), instructions=REVIEWER_PROMPT)
+    planner, extractor = llm.agent(Topics, PLANNER_PROMPT), llm.agent(Pointers, EXTRACTOR_PROMPT)
+    reviewer = llm.agent(Reviews, REVIEWER_PROMPT)
 
     def work(segment: dict[str, Any]) -> None:
         sid, text, units = segment["segment_id"], segment["text"], sentences(segment["text"])
@@ -256,12 +272,14 @@ def run_facts(doc: str | None = None, max_facts: int | None = None, force: bool 
                 chosen = [u for u in inside if u["id"].split(".")[0] in topic.paragraphs]
                 if not chosen:
                     continue  # the planner named paragraphs that aren't in this part
-                out = llm.call("extractor", extractor, extractor_prompt(part["heading"], topic, chosen, text, found),
+                heading = heading_path(segment, page_at(segment, chosen[0]["start"]))  # where the topic is, not where the part starts
+                out = llm.call("extractor", extractor, extractor_prompt(heading, topic, chosen, text, found),
                                f"{label} ▸ {topic.kind} ▸ {topic.topic[:50]}")
                 found += [{**f.model_dump(), "topic": topic.topic, "kind": topic.kind} for f in out.facts[:1]]
         kept, rejected = verify_facts(segment, review(reviewer, segment, found))
         done[sid] = {"segment_id": sid, "model": llm.settings().llm_model, "version": FACTS_VERSION,
                      "fingerprint": fingerprint(segment, n_facts), "max_facts": n_facts,
+                     "max_facts_from": "option" if max_facts else done.get(sid, {}).get("max_facts_from", "length"),
                      "facts": kept, "rejected": rejected}
         write_jsonl(FACTS, list(done.values()))  # saved after every segment, so a stop loses little
         audit_line(sid, "facts", kept, rejected)

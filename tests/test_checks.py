@@ -3,7 +3,6 @@ import json
 import pytest
 
 from bench import checks, facts, serve
-from bench.config import MAX_FACTS
 
 TEXT = "Give the calf colostrum within two hours of birth."
 
@@ -24,13 +23,12 @@ def _data(tmp_path, monkeypatch, fact_start=0):
     paths = {"PAGES": tmp_path / "pages.jsonl", "SEGMENTS": tmp_path / "segments.jsonl", "FACTS": tmp_path / "facts.jsonl"}
     _write(paths["PAGES"], pages)
     _write(paths["SEGMENTS"], [segment])
-    _write(paths["FACTS"], [{"segment_id": "book-01", "version": facts.FACTS_VERSION, "fingerprint": facts.fingerprint(segment, MAX_FACTS),
-                             "max_facts": MAX_FACTS, "model": "m", "facts": [fact], "rejected": []}])
+    _write(paths["FACTS"], [{"segment_id": "book-01", "version": facts.FACTS_VERSION, "fingerprint": facts.fingerprint(segment, facts.fact_budget(segment)),
+                             "max_facts": facts.fact_budget(segment), "model": "m", "facts": [fact], "rejected": []}])
     for name, path in paths.items():
         monkeypatch.setattr(checks, name, path)
     monkeypatch.setattr(checks, "PDF_DIR", tmp_path / "pdfs")
     monkeypatch.setattr(checks, "QUESTIONS", tmp_path / "questions.jsonl")  # not written: never the real data/ file
-    monkeypatch.setattr(checks, "DATA_DIR", tmp_path)
     return paths
 
 
@@ -70,7 +68,7 @@ def test_api_routes(tmp_path, monkeypatch):
 def test_agent_calls_are_traced_and_the_workbook_has_every_sheet(tmp_path, monkeypatch):
     from openpyxl import load_workbook
     from pydantic import BaseModel
-    from pydantic_ai import Agent, ModelResponse, NativeOutput, TextPart
+    from pydantic_ai import ModelResponse, TextPart
     from pydantic_ai.models.function import FunctionModel
 
     from bench import export, llm
@@ -78,11 +76,18 @@ def test_agent_calls_are_traced_and_the_workbook_has_every_sheet(tmp_path, monke
     class Out(BaseModel):
         items: list[str]
 
-    agent = Agent(FunctionModel(lambda m, i: ModelResponse(parts=[TextPart('{"items": ["a", "b"]}')])),
-                  output_type=NativeOutput(Out, strict=True))
+    asked = []
+    monkeypatch.setattr(llm, "model", lambda: FunctionModel(
+        lambda m, i: asked.append(1) or ModelResponse(parts=[TextPart('{"items": ["a", "b"]}')])))
+    agent = llm.agent(Out, "List things.")
     assert llm.call("tester", agent, "say two things", "book-01").items == ["a", "b"]
-    call = json.loads(llm.TRACE.read_text())
+    call = json.loads(llm.TRACE.read_text().splitlines()[0])
     assert call["role"] == "tester" and call["prompt"] == "say two things" and call["output"] == {"items": ["a", "b"]}
+    assert llm.call("tester", agent, "say two things", "book-01").items == ["a", "b"] and len(asked) == 1  # cached
+    llm.call("tester", llm.agent(Out, "List other things."), "say two things", "book-01")  # new instructions: asked
+    monkeypatch.setattr(llm, "USE_CACHE", False)
+    llm.call("tester", agent, "say two things", "book-01")  # --no-cache: asked again
+    assert len(asked) == 3
 
     paths = _data(tmp_path, monkeypatch, fact_start=TEXT.index("colostrum"))
     for name in ("SEGMENTS", "FACTS", "PAGES"):

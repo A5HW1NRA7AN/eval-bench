@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from pydantic_ai import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 

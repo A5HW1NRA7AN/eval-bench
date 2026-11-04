@@ -6,32 +6,23 @@ with the stage before it, and the fix is to re-run that stage.
 
 from __future__ import annotations
 
-import json
-import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from bench.config import DATA_DIR, MAX_FACTS, PDF_DIR, BenchError, question_types
-from bench.evaluate import REPORT
-from bench.facts import FACTS
+from bench.config import PDF_DIR, BenchError, question_types
+from bench.evaluate import REPORT, RESULTS
+from bench.facts import FACTS, fact_budget
 from bench.facts import fingerprint as facts_fingerprint
 from bench.pdf import PAGES, read_jsonl
 from bench.questions import LIBRARY, QUESTIONS, library_fingerprint, split_types
 from bench.questions import fingerprint as questions_fingerprint
-from bench.segments import SEGMENTS, TOC_VERSION, find_toc_pages, slug
+from bench.segments import INGEST, SEGMENTS
 from bench.templates import load_topics, templates
 from bench.testbed import CHUNKS, COLLECTION, qdrant
-from bench.verify import find, kept_fact_problem, question_problem
+from bench.verify import find, kept_fact_problem, question_problem, reason_group
 
-RESULTS = DATA_DIR / "results.jsonl"
 Check = tuple[str, bool, str]
-
-
-def reason_group(reason: str) -> str:
-    """One name per audit rule: '"goats" is in the library…' and 'needs 2-5 words, has 9' lose their specifics."""
-    rule = re.sub(r"^overlaps .*", "overlaps a kept fact", reason.split(":")[0])
-    return re.sub(r"\d+", "N", re.sub(r'"[^"]*"', "a term", rule))
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -51,12 +42,6 @@ def check_segment() -> list[Check]:
     for p in pages:
         by_pdf[p["file_name"]].append(p)
     pdfs = {path.name for path in PDF_DIR.glob("*.pdf")}
-    stale_toc = []
-    for name, pdf_pages in by_pdf.items():
-        cache = DATA_DIR / "toc" / f"{slug(name)}.json"
-        has_toc = bool(find_toc_pages(sorted(pdf_pages, key=lambda p: p["page"])))
-        if has_toc and (not cache.exists() or json.loads(cache.read_text()).get("version") != TOC_VERSION):
-            stale_toc.append(name)
     text = {(p["file_name"], p["page"]): p["text"] for p in pages}
     expected = {(p["file_name"], p["page"]) for p in pages if p["text"].strip() and not p["garbled"]}
     seen = Counter((s["file_name"], span["page"]) for s in segments for span in s["page_spans"])
@@ -64,14 +49,19 @@ def check_segment() -> list[Check]:
     misplaced = [s["segment_id"] for s in segments for span in s["page_spans"]
                  if s["text"][span["start"] : span["end"]] != text[(s["file_name"], span["page"])]]
     used = sum(s["use_for_questions"] for s in segments)
+    ingest = {r["file_name"]: r for r in _rows(INGEST)}
+    no_toc = [name for name, r in ingest.items() if r.get("segmented_by") != "TOC"]
+    textless = sum(n for r in ingest.values() for status, n in r["status"].items() if status != "text")
     return [
         ("every PDF in pdfs/ is extracted", set(by_pdf) == pdfs,
          f"{len(pdfs)} PDFs, {len(pages)} pages, {sum(p['garbled'] for p in pages)} junk-OCR pages left out"),
-        ("every TOC parse is cached at the current version", not stale_toc, ", ".join(stale_toc) or TOC_VERSION),
         ("every page with text is in exactly one segment", not twice and not lost,
          f"{len(segments)} segments, {used} used for questions" + (f"; twice: {twice[:3]}" if twice else "")
          + (f"; in none: {lost[:3]}" if lost else "")),
         ("page positions point at each page's text", not misplaced, ", ".join(sorted(set(misplaced))[:3]) or "ok"),
+        ("the ingest report covers every PDF", set(ingest) == set(by_pdf),
+         f"{textless} pages without usable text (see data/ingest.jsonl)"
+         + (f"; cut without a TOC: {', '.join(no_toc)}" if no_toc else "; every PDF cut along its TOC")),
     ]
 
 
@@ -83,7 +73,7 @@ def check_facts() -> list[Check]:
     used = [sid for sid, s in segments.items() if s["use_for_questions"]]
     rows = {r["segment_id"]: r for r in read_jsonl(FACTS)}
     stale = [sid for sid in used if sid not in rows
-             or rows[sid].get("fingerprint") != facts_fingerprint(segments[sid], rows[sid].get("max_facts", MAX_FACTS))]
+             or rows[sid].get("fingerprint") != facts_fingerprint(segments[sid], fact_budget(segments[sid], rows[sid]))]
     stale += [sid for sid in rows if sid not in used]  # rows of sections that are gone or no longer used
     broken = [f"{f['fact_id']} ({problem})" for sid, r in rows.items() if sid in segments for f in r["facts"]
               if (problem := kept_fact_problem(f, segments[sid]))]

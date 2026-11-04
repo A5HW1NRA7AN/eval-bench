@@ -21,7 +21,7 @@ import json
 from typing import Any, Literal
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, NativeOutput
+from pydantic_ai import Agent
 
 from bench import llm
 from bench.config import DATA_DIR, BenchError, question_types
@@ -203,15 +203,13 @@ def run_questions(doc: str | None = None, force: bool = False) -> None:
     by_id = {f["fact_id"]: f for row in facts.values() for f in row["facts"]}
     done = load_rows(QUESTIONS)
     library_row = done.pop(LIBRARY, None)
-    model = llm.model()
-    agents = {name: Agent(model, output_type=NativeOutput(Rewrites if t["source"] == "question" else Drafts, strict=True),
-                          instructions=(REWRITER_PROMPT if t["source"] == "question" else WRITER_PROMPT) + f"{name}: {t['prompt']}")
-              for name, t in types.items()}
+    agents = {name: llm.agent(Rewrites, REWRITER_PROMPT + f"{name}: {t['prompt']}") if t["source"] == "question"
+              else llm.agent(Drafts, WRITER_PROMPT + f"{name}: {t['prompt']}") for name, t in types.items()}
     section_types, library_types = split_types(types)
 
     def reviewer_for(some: dict[str, dict]) -> Agent[Any, Reviews]:
         described = "\n".join(f"- {name}: {t['review'] or ' '.join(t['prompt'].split())}" for name, t in some.items())
-        return Agent(model, output_type=NativeOutput(Reviews, strict=True), instructions=REVIEWER_PROMPT + described)
+        return llm.agent(Reviews, REVIEWER_PROMPT + described)
 
     reviewer = reviewer_for(section_types)
 
