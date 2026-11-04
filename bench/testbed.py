@@ -6,14 +6,16 @@ position in the segment tells us which chunks hold it.
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from openai import OpenAI
 from qdrant_client import QdrantClient, models
 
-from bench.config import DATA_DIR, settings
+from bench.config import DATA_DIR, BenchError, settings
 from bench.pdf import read_jsonl, write_jsonl
 from bench.segments import load_segments
 
@@ -65,8 +67,14 @@ def run_index() -> None:
             rows.append({"chunk_id": f"{seg['segment_id']}:c{n:03d}", "segment_id": seg["segment_id"],
                          "file_name": seg["file_name"], "start": start, "end": end,
                          "pages": [pages[0], pages[-1]] if pages else [], "text": seg["text"][start:end]})
+    url = settings().qdrant_url
+    host = urlparse(url if "://" in url else f"http://{url}").hostname
+    if host not in ("localhost", "127.0.0.1", "::1") and os.environ.get("BENCH_ALLOW_REMOTE_QDRANT") != "1":
+        raise BenchError(f"`bench index` deletes and rebuilds '{COLLECTION}', so it only runs on a local Qdrant; "
+                         f"QDRANT_URL points at {host or url} (set BENCH_ALLOW_REMOTE_QDRANT=1 to override)")
     vectors = embed([r["text"] for r in rows])
     client = qdrant()
+    print(f"rebuilding '{COLLECTION}' on {settings().qdrant_url}")
     if client.collection_exists(COLLECTION):
         client.delete_collection(COLLECTION)
     client.create_collection(COLLECTION, vectors_config=models.VectorParams(size=len(vectors[0]), distance=models.Distance.COSINE))
@@ -80,12 +88,14 @@ def run_index() -> None:
 
 
 def search(client: QdrantClient, vector: list[float], k: int) -> list[tuple[str, float]]:
-    """(chunk_id, score) of the k nearest chunks, best first."""
-    hits = client.query_points(COLLECTION, query=vector, limit=k, with_payload=True).points
-    return [(h.payload["chunk_id"], h.score) for h in hits]
+    """(chunk_id, score) of the k nearest chunks, best first. Exact search (no approximate index) and ties
+    broken by chunk_id, so the same question always gets the same ranking."""
+    hits = client.query_points(COLLECTION, query=vector, limit=k, with_payload=True,
+                               search_params=models.SearchParams(exact=True)).points
+    return sorted(((h.payload["chunk_id"], h.score) for h in hits), key=lambda hit: (-hit[1], hit[0]))
 
 
 def load_chunks() -> list[dict[str, Any]]:
     if not CHUNKS.exists():
-        raise SystemExit("data/chunks.jsonl missing: run `bench index` first")
+        raise BenchError("data/chunks.jsonl missing: run `bench index` first")
     return read_jsonl(CHUNKS)

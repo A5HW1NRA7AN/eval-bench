@@ -12,14 +12,16 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from bench.config import DATA_DIR, PDF_DIR, question_types
+from bench.config import DATA_DIR, MAX_FACTS, PDF_DIR, BenchError, question_types
 from bench.evaluate import REPORT
-from bench.facts import FACTS, FACTS_VERSION
+from bench.facts import FACTS
+from bench.facts import fingerprint as facts_fingerprint
 from bench.pdf import PAGES, read_jsonl
-from bench.questions import LIBRARY, QUESTIONS, QUESTIONS_VERSION
+from bench.questions import LIBRARY, QUESTIONS, library_fingerprint, split_types
+from bench.questions import fingerprint as questions_fingerprint
 from bench.segments import SEGMENTS, TOC_VERSION, find_toc_pages, slug
 from bench.testbed import CHUNKS, COLLECTION, qdrant
-from bench.verify import MAX_QUOTE_CHARS, claim_problem, find, question_problem, table_row
+from bench.verify import find, kept_fact_problem, question_problem
 
 RESULTS = DATA_DIR / "results.jsonl"
 Check = tuple[str, bool, str]
@@ -73,63 +75,75 @@ def check_segment() -> list[Check]:
 
 
 def check_facts() -> list[Check]:
-    """Facts: current prompt version, quotes still verbatim at their positions, fact rules hold."""
+    """Facts: every row made from today's inputs, and kept facts still pass the fact rules (models are listed)."""
     if not FACTS.exists():
         return _missing(FACTS, "facts")
     segments = {s["segment_id"]: s for s in _rows(SEGMENTS)}
-    rows = read_jsonl(FACTS)
-    done = {r["segment_id"] for r in rows if r["version"] == FACTS_VERSION}
-    todo = [sid for sid, s in segments.items() if s["use_for_questions"] and sid not in done]
-    moved, broken = [], []
-    for r in rows:
-        segment = segments.get(r["segment_id"], {"text": "", "title": "", "file_name": "", "headings": []})
-        for f in r["facts"]:
-            if find(f["quote"], segment["text"][f["start"] : f["end"]]) is None:
-                moved.append(f["fact_id"])
-            if len(f["quote"]) > MAX_QUOTE_CHARS or table_row(f["quote"]) or claim_problem(f["claim"], f["quote"], segment):
-                broken.append(f["fact_id"])
-    kept, rejected = sum(len(r["facts"]) for r in rows), Counter(x["reason"] for r in rows for x in r["rejected"])
-    reasons = Counter(reason_group(reason) for reason in rejected.elements())
+    used = [sid for sid, s in segments.items() if s["use_for_questions"]]
+    rows = {r["segment_id"]: r for r in read_jsonl(FACTS)}
+    stale = [sid for sid in used if sid not in rows
+             or rows[sid].get("fingerprint") != facts_fingerprint(segments[sid], rows[sid].get("max_facts", MAX_FACTS))]
+    stale += [sid for sid in rows if sid not in used]  # rows of sections that are gone or no longer used
+    broken = [f"{f['fact_id']} ({problem})" for sid, r in rows.items() if sid in segments for f in r["facts"]
+              if (problem := kept_fact_problem(f, segments[sid]))]
+    kept = sum(len(r["facts"]) for r in rows.values())
+    flagged = sum(f.get("review", {}).get("verdict") == "flag" for r in rows.values() for f in r["facts"])
+    rejected = Counter(reason_group(x["reason"]) for r in rows.values() for x in r["rejected"])
+    models = ", ".join(f"{m}: {n} rows" for m, n in Counter(r.get("model") for r in rows.values()).items()) or "no rows"
     return [
-        (f"every question segment has facts ({FACTS_VERSION})", not todo, f"{len(done)} segments done" + (f"; to do: {todo[:3]}" if todo else "")),
-        ("every quote is verbatim at its recorded position", not moved, f"{kept} facts" + (f"; moved: {moved[:3]}" if moved else "")),
-        ("every fact follows the fact rules", not broken, f"the audit rejected {sum(rejected.values())}: {dict(reasons)}"
-         + (f"; breaking: {broken[:3]}" if broken else "")),
+        ("every question segment has facts made from today's inputs", not stale,
+         f"{len(used) - len([s for s in stale if s in used])} of {len(used)} segments current"
+         + (f"; stale or missing: {stale[:3]} (run `bench facts`)" if stale else "")),
+        ("every kept fact still passes the fact rules", not broken,
+         f"{kept} facts ({flagged} flagged by the AI reviewer; models {models}); the audit rejected "
+         f"{sum(rejected.values())}: {dict(rejected)}" + (f"; failing: {broken[:3]}" if broken else "")),
     ]
 
 
 def check_questions() -> list[Check]:
-    """Questions: valid types, current version, still pass the audit against their facts, evidence still in place."""
+    """Questions: valid types, every row made from today's inputs, still pass the audit, evidence in place."""
     try:
         types = question_types()
-    except SystemExit as exc:
+    except BenchError as exc:
         return [("question_types.toml is valid", False, str(exc))]
     if not QUESTIONS.exists():
         return _missing(QUESTIONS, "questions")
     segments = {s["segment_id"]: s for s in _rows(SEGMENTS)}
-    facts = {f["fact_id"]: f for r in _rows(FACTS) for f in r["facts"]}
+    facts_rows = {r["segment_id"]: r for r in _rows(FACTS)}
+    facts = {f["fact_id"]: f for r in facts_rows.values() for f in r["facts"]}
     corpus = "\n".join(p["text"] for p in _rows(PAGES))
-    rows = read_jsonl(QUESTIONS)
-    facts_version = {r["segment_id"]: r["version"] for r in _rows(FACTS)} | {LIBRARY: FACTS_VERSION}
-    done = {r["segment_id"] for r in rows if r["version"] == QUESTIONS_VERSION and r.get("facts_version") == facts_version.get(r["segment_id"])}
-    todo = [sid for sid in {r["segment_id"] for r in _rows(FACTS) if r["facts"]} if sid not in done]
+    rows = {r["segment_id"]: r for r in read_jsonl(QUESTIONS)}
+    section_types, library = split_types(types)
+    expected = {sid: questions_fingerprint(section_types, facts_rows.get(sid, {}).get("facts", []), s["title"])
+                for sid, s in segments.items() if s["use_for_questions"]}
+    if library:
+        expected[LIBRARY] = library_fingerprint(library, list(facts_rows.values()), {sid: s["title"] for sid, s in segments.items()})
+    stale = [sid for sid, fp in expected.items() if rows.get(sid, {}).get("fingerprint") != fp]
+    stale += [sid for sid in rows if sid not in expected]  # rows of sections that are gone, or a library row no type needs
     failing, moved = [], []
-    questions = [q for r in rows for q in r["questions"]]
+    questions = [q for r in rows.values() for q in r["questions"]]
     for q in questions:
         if q["type"] not in types:
-            failing.append(f"{q['question_id']} (type {q['type']} is not in question_types.toml)")
-        elif problem := question_problem(q, facts, types[q["type"]].get("rules", {}), corpus):
+            failing.append(f"{q['question_id']} (type {q['type']} is switched off or not in question_types.toml)")
+        elif problem := question_problem(q, facts, types[q["type"]]["rules"], corpus):
             failing.append(f"{q['question_id']} ({problem})")
         if any(find(ev["quote"], segments.get(ev.get("segment_id", ""), {}).get("text", "")[ev["start"] : ev["end"]]) is None
-               for ev in q["evidence"]):  # rows before questions-v6 have no segment_id: they fail here, and are redone
+               for ev in q["evidence"]):
             moved.append(q["question_id"])
     counts = Counter(q["type"] for q in questions)
-    rejected = Counter(reason_group(x["reason"]) for r in rows for x in r["rejected"])
+    flagged = sum(q.get("review", {}).get("verdict") == "flag" for q in questions)
+    rejected = Counter(reason_group(x["reason"]) for r in rows.values() for x in r["rejected"])
+    models = ", ".join(f"{m}: {n} rows" for m, n in Counter(r.get("model") for r in rows.values()).items()) or "no rows"
     return [
-        ("question_types.toml is valid", True, f"{len(types)} types: {', '.join(types)}"),
-        (f"every segment with facts has questions ({QUESTIONS_VERSION})", not todo, f"{len(done)} rows done" + (f"; to do: {todo[:3]}" if todo else "")),
-        ("every question still passes the audit", not failing, f"{len(questions)} questions {dict(counts)}" + (f"; failing: {failing[:3]}" if failing else "")),
-        ("every evidence quote is at its recorded position", not moved, ", ".join(moved[:3]) or f"the audit rejected {sum(rejected.values())}: {dict(rejected)}"),
+        ("question_types.toml is valid", True, f"{len(types)} active types: {', '.join(types)}"),
+        ("every segment with facts has questions made from today's inputs", not stale,
+         f"{len(expected) - len([s for s in stale if s in expected])} of {len(expected)} rows current"
+         + (f"; stale or missing: {stale[:3]} (run `bench questions`)" if stale else "")),
+        ("every question still passes the audit", not failing,
+         f"{len(questions)} questions {dict(counts)}, {flagged} flagged by the AI reviewer; models {models}"
+         + (f"; failing: {failing[:3]}" if failing else "")),
+        ("every evidence quote is at its recorded position", not moved,
+         ", ".join(moved[:3]) or f"the audit rejected {sum(rejected.values())}: {dict(rejected)}"),
     ]
 
 
@@ -155,13 +169,19 @@ def check_index() -> list[Check]:
 
 
 def check_evaluate() -> list[Check]:
-    """Results: one per current question, and a report."""
+    """Results: exactly the current questions (matched by content id, so stale results can't pass), and a report."""
     if not RESULTS.exists():
         return _missing(RESULTS, "evaluate")
-    scored = {r["question_id"] for r in read_jsonl(RESULTS)}
-    current = {q["question_id"] for r in _rows(QUESTIONS) for q in r["questions"]}
-    return [("every current question is scored", scored == current and REPORT.exists(),
-             f"{len(scored)} scored of {len(current)} questions; report {'written' if REPORT.exists() else 'missing'}")]
+    scored = [r.get("uid") for r in read_jsonl(RESULTS)]
+    current = [q.get("uid") for r in _rows(QUESTIONS) for q in r["questions"]]
+    if None in scored or None in current:  # made before content ids: they can't be matched
+        return [("every current question is scored", False, "questions or results have no content id: run `bench questions` "
+                 "and `bench evaluate`")]
+    gone = set(scored) - set(current)
+    return [("every current question is scored", set(scored) == set(current) and REPORT.exists(),
+             f"{len(set(scored) & set(current))} of {len(set(current))} current questions scored"
+             + (f"; {len(gone)} results are for questions that no longer exist" if gone else "")
+             + f"; report {'written' if REPORT.exists() else 'missing'}")]
 
 
 STAGES = {"segment": check_segment, "facts": check_facts, "questions": check_questions, "index": check_index,

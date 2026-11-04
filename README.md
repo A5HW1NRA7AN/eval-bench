@@ -25,12 +25,12 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
 2. **facts**: each segment is read in parts of about 12,000 characters (a few pages), cut at paragraph breaks, by three agents:
    - The **planner** sees the part as numbered paragraphs and picks searchable topics, each either a figure (one value) or an explanation (a procedure, list, comparison or rule).
    - The **extractor** sees each topic's paragraphs as numbered sentences. It writes a self-contained claim and points at the sentences that state it: one for a figure, usually the whole paragraph for an explanation. Code cuts the quote there, so it is never retyped.
-   - The **reviewer** reads every fact with its quote and keeps it, fixes its claim or drops it, with a reason.
+   - The **reviewer** reads every fact with its quote and keeps it, fixes its claim or flags it, with a reason. A flag is an AI verdict: it is recorded and reported, but only the regex audit decides what is kept.
    - Each part carries its heading path, the end of the previous part and the facts found so far. The segment's fact limit is shared evenly across its parts: given a whole chapter at once, the model took all its facts from the first fifth.
-3. **questions**: one writer agent per question type writes questions from each section's verified facts. A question reviewer keeps, rewords or drops each one, and the regex audit decides. The types live in **`question_types.toml`** (count, source, prompt and audit rules), so adding a type needs no code:
+3. **questions**: one writer agent per question type writes questions from each section's verified facts. A question reviewer keeps, rewords or flags each one (flags are reported as AI verdicts), and the regex audit alone decides. Questions are English only for now. The types live in **`question_types.toml`** (count, source, prompt and audit rules), so adding a type needs no code:
    - `direct`, `paraphrased` (other words), `keyword` (2–5 words), `precise` (a number with its qualifiers), `multi_fact` (two facts);
    - `comparison`: several answer parts from one paragraph-sized fact;
-   - `noisy`: a kept question retyped the way farmers type (typos, Hinglish);
+   - `noisy`: a kept question retyped the way farmers type (switched off for now: questions are English only);
    - `unanswerable`: a qualifier changed to something the library never mentions;
    - `multi_hop`: facts from two sections or PDFs, written once for the whole library.
 4. **index**: every segment is cut into chunks without overlap or gaps, embedded with `bge-m3` and stored in Qdrant.
@@ -44,8 +44,9 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
   - multi-fact and multi-hop questions take an answer span from each fact, and multi-hop facts come from two sections;
   - at most half of a paraphrase's content words may come from its quote;
   - an unanswerable question names a term found nowhere in the library;
-  - a noisy question differs from the question it rewrites.
-- **Rejected items** are kept in the output with the reason.
+  - a noisy question differs from the question it rewrites;
+  - every question is plain English (no Indian script or romanized-Hindi words) and carries no internal id such as `d8_1`.
+- **Rejected items** are kept in the output with the reason. Every kept fact and question has a content id (`uid`), so results can't be matched to the wrong question after a re-run.
 
 ## Setup
 
@@ -55,7 +56,7 @@ Needs [uv](https://docs.astral.sh/uv/), Docker and [Ollama](https://ollama.com).
 ollama pull gemma4:12b        # writes facts and questions locally (~8 GB)
 ollama pull bge-m3            # embeddings for the test bed (~1.2 GB)
 cp .env.example .env          # then fill in GEMMA_URL and GEMMA_API_KEY to use the remote Gemma 4
-uv sync
+uv sync --locked
 docker compose up -d          # local Qdrant on 127.0.0.1:6333
 ```
 
@@ -95,7 +96,9 @@ Import `postman/eval-bench.postman_collection.json` into Postman. It holds reque
 - every stage's output, through `bench serve`;
 - the local Ollama models.
 
-The `facts` and `questions` stages save after every segment. They skip segments already done at the current prompt version, so a stopped run picks up where it left off, and a bumped version redoes the old rows. After changing a stage, re-run the stages that follow it (`--force` where needed). `evaluate` stops if a question's evidence no longer matches the indexed text.
+The `facts` and `questions` stages save after every segment (atomically, so a stop never corrupts a file). Each row carries a **fingerprint** of everything that made it (prompts, output schemas, question types, settings and the text or facts it was written from). A run skips rows whose fingerprint is current and redoes the rest, plus rows whose kept items no longer pass the audit, so editing a prompt or `question_types.toml` redoes exactly what it affects. The model is recorded but not fingerprinted: to regenerate with another model, use `--force`. A section that fails (e.g. the endpoint is down) is left to do while the stage carries on; after 3 failures in a row the stage stops, and a re-run resumes. Only one writing command runs at a time per `data/` folder. `evaluate` first checks the questions and test bed, and stops if a question's evidence no longer matches the indexed text.
+
+**Troubleshooting.** `✗ another bench command is writing data/`: wait for the other run. `N sections failed in a row`: the LLM endpoint is probably down (the remote Gemma 4 endpoint is up until about 9 pm IST); re-run later and it resumes. `Qdrant is not reachable`: `docker compose up -d`. `bench index` only rebuilds a local Qdrant.
 
 **Switching to Gemma 4:** set `LLM_PROVIDER=gemma` in `.env`, or prefix a single command (`LLM_PROVIDER=gemma uv run bench questions`). The remote endpoint is only up in the daytime.
 

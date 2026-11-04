@@ -16,7 +16,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from bench.checks import RESULTS, all_checks, reason_group
 from bench.config import DATA_DIR
-from bench.evaluate import KS, summary
+from bench.evaluate import KS, summary, test_set_id
 from bench.facts import FACTS
 from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl
@@ -66,12 +66,17 @@ def _sheet(book: Workbook, title: str, rows: list[dict[str, Any]], bad: Callable
     ws.freeze_panes, ws.auto_filter.ref = "B2", ws.dimensions
 
 
+def flags(items: Any) -> int:
+    """How many items carry an AI reviewer flag (an AI verdict; the regex audit decided they're kept)."""
+    return sum(item.get("review", {}).get("verdict") == "flag" for item in items)
+
+
 def run_export() -> Path:
     segments, facts, questions = _rows(SEGMENTS), _rows(FACTS), _rows(QUESTIONS)
     results, trace = _rows(RESULTS), _rows(TRACE)
     chunks = {c["chunk_id"]: c for c in _rows(CHUNKS)}
     facts_by, questions_by = {r["segment_id"]: r for r in facts}, {r["segment_id"]: r for r in questions}
-    scored = {r["question_id"]: r for r in results}
+    scored = {r.get("uid") or r["question_id"]: r for r in results}  # by content id, so stale results don't match
     answerable = [r for r in results if r.get("answerable", True)]
 
     def missed(r: dict[str, Any]) -> bool:  # an answerable question whose evidence wasn't in the top 10: shaded red
@@ -87,9 +92,12 @@ def run_export() -> Path:
         {"stage": "pages", "rows": len(_rows(PAGES)), "detail": "cleaned PDF pages"},
         {"stage": "segments", "rows": len(segments), "detail": f"{sum(s['use_for_questions'] for s in segments)} used for questions"},
         {"stage": "facts", "rows": sum(len(r["facts"]) for r in facts),
-         "detail": f"{sum(len(r['rejected']) for r in facts)} rejected by the audit"},
+         "detail": f"{sum(len(r['rejected']) for r in facts)} rejected by the regex audit; "
+                   f"{flags(f for r in facts for f in r['facts'])} kept with an AI reviewer flag"},
         {"stage": "questions", "rows": sum(len(r["questions"]) for r in questions),
-         "detail": f"{sum(len(r['rejected']) for r in questions)} rejected by the audit"},
+         "detail": f"{sum(len(r['rejected']) for r in questions)} rejected by the regex audit; "
+                   f"{flags(q for r in questions for q in r['questions'])} kept with an AI reviewer flag; "
+                   f"test set {test_set_id([q for r in questions for q in r['questions']])}"},
         {"stage": "test bed", "rows": len(chunks), "detail": "chunks in Qdrant"},
         {"stage": "evaluate", "rows": len(results),
          "detail": ", ".join(f"{m} {v:.2f}" for m, v in summary(answerable, "type")[0].items() if m.startswith(("hit", "rr")))
@@ -105,20 +113,21 @@ def run_export() -> Path:
          "questions_rejected": len(questions_by.get(s["segment_id"], {}).get("rejected", []))} for s in segments])
     _sheet(book, "Facts", [{"fact_id": f["fact_id"], "size": f.get("size"), "claim": f["claim"], "quote": f["quote"],
                             "pages": f"{f['pages'][0]}-{f['pages'][-1]}", "chars": len(f["quote"]), "topic": f.get("topic"),
-                            "review": f.get("review", {}).get("verdict"), "claim_before_review": f.get("review", {}).get("original"),
-                            "review_reason": f.get("review", {}).get("reason"), "model": r.get("model"), "version": r["version"]}
+                            "ai_review": f.get("review", {}).get("verdict"), "claim_before_review": f.get("review", {}).get("original"),
+                            "ai_review_reason": f.get("review", {}).get("reason"), "model": r.get("model"), "version": r["version"]}
                            for r in facts for f in r["facts"]])
     _sheet(book, "Rejected facts", [{"segment_id": r["segment_id"], "reason": f["reason"], "claim": f["claim"], "quote": f.get("quote"),
                                      "sentences": f"{f['first']}–{f['last']}" if "first" in f else None, "topic": f.get("topic")}
                                     for r in facts for f in r["rejected"]])
     _sheet(book, "Questions", [
-        {"question_id": q["question_id"], "type": q["type"], "question": q["question"], "answer": q.get("answer"),
-         "absent_term": q.get("absent_term") or None, "rewrites": q.get("source_question"),
-         "review": q.get("review", {}).get("verdict"), "question_before_review": q.get("review", {}).get("original"),
+        {"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "question": q["question"],
+         "answer": q.get("answer"), "absent_term": q.get("absent_term") or None, "rewrites": q.get("source_question"),
+         "ai_review": q.get("review", {}).get("verdict"), "ai_review_reason": q.get("review", {}).get("reason"),
+         "question_before_review": q.get("review", {}).get("original"),
          "fact_ids": ", ".join(q["fact_ids"]), "evidence": "\n---\n".join(ev["quote"] for ev in q["evidence"]),
-         "first_rank": scored.get(q["question_id"], {}).get("first_rank"),
-         **{f"hit@{k}": scored.get(q["question_id"], {}).get(f"hit@{k}") for k in KS}}
-        for r in questions for q in r["questions"]], bad=lambda row: missed(scored.get(row["question_id"], {})))
+         "first_rank": scored.get(q.get("uid") or q["question_id"], {}).get("first_rank"),
+         **{f"hit@{k}": scored.get(q.get("uid") or q["question_id"], {}).get(f"hit@{k}") for k in KS}}
+        for r in questions for q in r["questions"]], bad=lambda row: missed(scored.get(row["uid"] or row["question_id"], {})))
     _sheet(book, "Rejected questions", [{"segment_id": r["segment_id"], "reason": q["reason"], "type": q["type"],
                                          "question": q["question"], "answer": q.get("answer"), "fact_ids": ", ".join(q["fact_ids"])}
                                         for r in questions for q in r["rejected"]])
@@ -139,9 +148,10 @@ def run_export() -> Path:
     _sheet(book, "Audit reasons", [{"stage": s, "reason": reason, "count": n} for (s, reason), n in rejects.most_common()])
     _sheet(book, "Checks", [{"stage": stage, "check": name, "ok": ok, "detail": detail}
                             for stage, checks in all_checks().items() for name, ok, detail in checks], bad=lambda row: not row["ok"])
-    _sheet(book, "Agent calls", [{"time": t["time"], "role": t["role"], "label": t["label"], "model": t["model"],
-                                  "seconds": t["seconds"], "input_tokens": t["input_tokens"], "output_tokens": t["output_tokens"],
-                                  "output": t["output"], "prompt": t["prompt"]} for t in trace])
+    _sheet(book, "Agent calls", [{"time": t["time"], "run": t.get("run"), "role": t["role"], "label": t["label"],
+                                  "model": t["model"], "seconds": t["seconds"], "input_tokens": t.get("input_tokens"),
+                                  "output_tokens": t.get("output_tokens"), "error": t.get("error"), "output": t.get("output"),
+                                  "prompt": t["prompt"]} for t in trace], bad=lambda row: bool(row["error"]))
     book.save(WORKBOOK)
     print(f"wrote {WORKBOOK}: {', '.join(book.sheetnames)}")
     return WORKBOOK

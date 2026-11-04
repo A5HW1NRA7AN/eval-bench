@@ -14,10 +14,11 @@ from typing import Any
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, NativeOutput
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 
 from bench import llm
-from bench.config import DATA_DIR
-from bench.pdf import load_pages, read_jsonl, write_jsonl
+from bench.config import DATA_DIR, REQUEST_TIMEOUT, BenchError
+from bench.pdf import load_pages, read_jsonl, write_jsonl, write_text
 
 SEGMENTS = DATA_DIR / "segments.jsonl"
 TOC_SCAN_PAGES = 25  # the printed TOC sits near the front
@@ -89,16 +90,23 @@ def read_toc(file_name: str, toc_text: str) -> list[TocEntry]:
     """Ask the LLM to parse the TOC once. Its raw answer is cached in data/toc/, so re-runs are
     offline and changes to the checks below never need the LLM again."""
     cache = DATA_DIR / "toc" / f"{slug(file_name)}.json"
-    cached = json.loads(cache.read_text()) if cache.exists() else {}
-    if cached.get("version") == TOC_VERSION:
-        raw = [TocEntry(**e) for e in cached["entries"]]
-    else:
+    try:
+        cached = json.loads(cache.read_text()) if cache.exists() else {}
+        raw = [TocEntry(**e) for e in cached["entries"]] if cached.get("version") == TOC_VERSION else None
+    except (ValueError, KeyError, TypeError):  # an unreadable cache is parsed again
+        raw = None
+    if raw is None:
         agent = Agent(llm.model(), output_type=NativeOutput(TocEntries, strict=True), instructions=TOC_PROMPT)
-        # a long TOC needs more than the default output cap
-        raw = llm.call("toc", agent, toc_text, file_name, model_settings={"max_tokens": 8_000}).entries
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        try:  # a long TOC needs more output, and more time, than the defaults
+            raw = llm.call("toc", agent, toc_text, file_name,
+                           model_settings={"max_tokens": 8_000, "request_timeout": 3 * REQUEST_TIMEOUT}).entries
+        except UnexpectedModelBehavior:
+            raise  # an answer that can't be parsed: segment_pdf falls back to one segment
+        except Exception as exc:  # an outage: saving the whole-PDF fallback would look like a real result
+            raise BenchError(f"{file_name}: the TOC agent failed ({type(exc).__name__}: {exc}). Nothing was saved; "
+                             "re-run `bench segment` when the LLM endpoint is up") from exc
         record = {"version": TOC_VERSION, "model": llm.settings().llm_model, "entries": [e.model_dump() for e in raw]}
-        cache.write_text(json.dumps(record, indent=1, ensure_ascii=False))
+        write_text(cache, json.dumps(record, indent=1, ensure_ascii=False))
     return keep_valid(raw, toc_text)
 
 
@@ -209,7 +217,7 @@ def segment_pdf(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     toc_pages = find_toc_pages(pages)
     try:
         entries = read_toc(file_name, "\n".join(pages[n - 1]["raw_text"] for n in toc_pages)) if toc_pages else []
-    except Exception as exc:  # an unparseable TOC must not stop the other PDFs
+    except UnexpectedModelBehavior as exc:  # an answer that can't be parsed must not stop the other PDFs
         print(f"  {file_name}: TOC could not be parsed ({type(exc).__name__})")
         entries = []
     agreement, placed = locate(entries, pages, toc_pages[-1]) if entries else (0.0, [])
@@ -316,5 +324,5 @@ def run_segments(refresh: bool = False) -> list[dict[str, Any]]:
 
 def load_segments() -> list[dict[str, Any]]:
     if not SEGMENTS.exists():
-        raise SystemExit("data/segments.jsonl missing: run `bench segment` first")
+        raise BenchError("data/segments.jsonl missing: run `bench segment` first")
     return read_jsonl(SEGMENTS)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 
 import pymupdf
 
-from bench.config import DATA_DIR, PDF_DIR
+from bench.config import DATA_DIR, PDF_DIR, BenchError
 
 EDGE_LINES = 3  # lines at the top and bottom of a page that may be headers or footers
 REPEATS = 4  # a header/footer must repeat on this many pages
@@ -24,15 +25,34 @@ PAGES = DATA_DIR / "pages.jsonl"
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows = []
     with path.open() as f:
-        return [json.loads(line) for line in f if line.strip()]
+        for n, line in enumerate(f, start=1):
+            if line.strip():
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise BenchError(f"{path.name} line {n} isn't valid JSON ({exc.msg}); re-run the stage that writes it") from exc
+    return rows
+
+
+def write_text(path: Path, text: str) -> None:
+    """Write to a temporary file and rename it over the target, so a stop mid-write never loses the last version."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        with tmp.open("w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:  # including Ctrl+C: the target keeps its last complete version
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_text(path, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
 
 
 def _edges(lines: list[str]) -> list[str]:
@@ -106,7 +126,7 @@ def load_pages(refresh: bool = False) -> list[dict[str, Any]]:
     out = PAGES
     pdfs = sorted(PDF_DIR.glob("*.pdf"))
     if not pdfs:
-        raise SystemExit(f"no PDFs in {PDF_DIR}")
+        raise BenchError(f"no PDFs in {PDF_DIR}")
     if out.exists() and not refresh:
         pages = read_jsonl(out)
         if {p["file_name"] for p in pages} == {path.name for path in pdfs}:

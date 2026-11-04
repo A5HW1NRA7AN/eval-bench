@@ -64,7 +64,7 @@ def test_fact_sizes_and_numbers():
     assert numbers("Aflatoxin B1 at 20 ppb") == {"20"}  # B1 is a name, not the number 1
 
 
-RULES = {name: t.get("rules", {}) for name, t in question_types().items()}
+RULES = {name: t["rules"] for name, t in question_types(active_only=False).items()}
 
 
 def test_question_audit_rules():
@@ -107,7 +107,23 @@ def test_question_audit_rules():
     noisy = {"type": "noisy", "question": "how much oil cake in late pregnancy?", "fact_ids": ["f1"], "answer": "1 kg",
              "source_question": "How much oil cake in late pregnancy?"}
     assert check(noisy) == "the rewrite is the same as its source"
-    assert check({**noisy, "question": "pregnent bhains ko kitna oil cake"}) is None
+    assert check({**noisy, "question": "pregnent bhains ko kitna oil cake"}) is None  # noisy allows it (and is off)
+
+
+def test_english_only_internal_ids_years_and_whole_answer_pieces():
+    facts_ = {"f1": {"fact_id": "book-01:f01", "quote": "Give 11 kg of green fodder in 2024–25, and 1 kg of concentrate."}}
+    ok = {"type": "precise", "question": "How much concentrate per cow in 2024-25?", "fact_ids": ["f1"], "answer": "1 kg"}
+
+    def check(q):
+        return question_problem(q, facts_, RULES[q["type"]])
+
+    assert check(ok) is None
+    assert check({**ok, "question": "2024-25 me kitna concentrate dena hai?"}) == "question isn't plain English: dena, hai, kitna"
+    assert check({**ok, "question": "गाय को कितना चारा 2024-25?"}).startswith("question isn't plain English")
+    assert check({**ok, "question": "How much concentrate in 2024-25 [d8_1]?"}) == "question contains an internal id: d8_1"
+    assert check({**ok, "question": "How much concentrate per cow?"}) == "question drops its quote's year"  # en dash span
+    assert check({**ok, "answer": "1 kg of green"}) == "answer not found in its facts' quotes"
+    assert find("1 kg", "Give 11 kg", whole=True) is None and find("1 kg", "Give 1 kg.", whole=True) == (5, 9)
 
 
 def _fake_agents(messages, info):
@@ -116,7 +132,7 @@ def _fake_agents(messages, info):
     if "FACTS TO REVIEW" in prompt:
         reply = {"reviews": [{"id": "f1", "verdict": "rewrite", "reason": "missed the compound feed",
                               "claim": "Pregnant animals get 1 kg compound cattle feed and 1 kg oil cake in the last two months."},
-                             {"id": "f2", "verdict": "drop", "claim": "", "reason": "repeats f1"}]}
+                             {"id": "f2", "verdict": "flag", "claim": "", "reason": "repeats f1"}]}
     elif "TOPIC:" in prompt:
         reply = {"facts": [{"claim": "Pregnant animals get 1 kg oil cake in the last two months.", "first": "p2.s1", "last": "p2.s1"}]}
     else:
@@ -135,12 +151,15 @@ def test_fact_stage_plans_extracts_reviews_and_audits(tmp_path, monkeypatch):
     assert fact["claim"].startswith("Pregnant animals get 1 kg compound cattle feed") and fact["topic"] == "feed in late pregnancy"
     assert fact["review"]["original"] == "Pregnant animals get 1 kg oil cake in the last two months."
     assert fact["quote"] == TEXT[fact["start"] : fact["end"]] and fact["size"] == "sentence"
-    assert [r["reason"] for r in row["rejected"]] == ["reviewer: repeats f1"]  # "not here" named no paragraph of the part
+    # the reviewer's flag doesn't remove the repeat: the regex audit rejects it ("not here" named no paragraph of the part)
+    (repeat,) = row["rejected"]
+    assert repeat["reason"] == "overlaps book-01:f01" and repeat["review"] == {"verdict": "flag", "reason": "repeats f1"}
+    assert repeat["decided_by"] == "audit" and fact["uid"] and row["fingerprint"] == facts.fingerprint(SEGMENT, facts.MAX_FACTS)
     facts.run_facts()  # resumes: the segment is already done, nothing changes
     assert len((tmp_path / "facts.jsonl").read_text().splitlines()) == 1
-    (tmp_path / "facts.jsonl").write_text(json.dumps({**row, "version": "facts-v0", "facts": []}))
-    facts.run_facts()  # a row from an older version is redone
-    assert json.loads((tmp_path / "facts.jsonl").read_text())["version"] == facts.FACTS_VERSION
+    (tmp_path / "facts.jsonl").write_text(json.dumps({**row, "fingerprint": "made-by-older-prompts", "facts": []}))
+    facts.run_facts()  # a row made from other inputs is redone
+    assert json.loads((tmp_path / "facts.jsonl").read_text())["fingerprint"] == row["fingerprint"]
 
 
 def test_facts_are_asked_for_evenly_across_parts(tmp_path, monkeypatch):

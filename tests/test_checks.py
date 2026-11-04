@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from bench import checks, serve
+from bench import checks, facts, serve
+from bench.config import MAX_FACTS
 
 TEXT = "Give the calf colostrum within two hours of birth."
 
@@ -12,7 +13,7 @@ def _write(path, rows):
 
 
 def _data(tmp_path, monkeypatch, fact_start=0):
-    (tmp_path / "pdfs").mkdir()
+    (tmp_path / "pdfs").mkdir(exist_ok=True)
     (tmp_path / "pdfs" / "book.pdf").write_bytes(b"")
     pages = [{"file_name": "book.pdf", "page": n, "text": TEXT, "raw_text": TEXT, "garbled": False, "printed": n} for n in (1, 2, 3)]
     segment = {"segment_id": "book-01", "file_name": "book.pdf", "title": "1 Calves", "pages": [1, 2], "use_for_questions": True,
@@ -23,7 +24,8 @@ def _data(tmp_path, monkeypatch, fact_start=0):
     paths = {"PAGES": tmp_path / "pages.jsonl", "SEGMENTS": tmp_path / "segments.jsonl", "FACTS": tmp_path / "facts.jsonl"}
     _write(paths["PAGES"], pages)
     _write(paths["SEGMENTS"], [segment])
-    _write(paths["FACTS"], [{"segment_id": "book-01", "version": checks.FACTS_VERSION, "facts": [fact], "rejected": []}])
+    _write(paths["FACTS"], [{"segment_id": "book-01", "version": facts.FACTS_VERSION, "fingerprint": facts.fingerprint(segment, MAX_FACTS),
+                             "max_facts": MAX_FACTS, "model": "m", "facts": [fact], "rejected": []}])
     for name, path in paths.items():
         monkeypatch.setattr(checks, name, path)
     monkeypatch.setattr(checks, "PDF_DIR", tmp_path / "pdfs")
@@ -37,11 +39,19 @@ def test_checks_catch_a_lost_page_and_a_moved_quote(tmp_path, monkeypatch):
     results = {name: ok for name, ok, _ in checks.check_segment() + checks.check_facts()}
     assert results["every PDF in pdfs/ is extracted"] and results["page positions point at each page's text"]
     assert not results["every page with text is in exactly one segment"]  # page 3 is in no segment
-    assert not results["every quote is verbatim at its recorded position"]
+    assert results["every question segment has facts made from today's inputs"]
+    assert not results["every kept fact still passes the fact rules"]  # the quote isn't at its position
     fixed = tmp_path / "fixed"
     fixed.mkdir()
     _data(fixed, monkeypatch, fact_start=TEXT.index("colostrum"))
-    assert dict((n, ok) for n, ok, _ in checks.check_facts())["every quote is verbatim at its recorded position"]
+    assert dict((n, ok) for n, ok, _ in checks.check_facts())["every kept fact still passes the fact rules"]
+
+
+def test_a_changed_prompt_or_setting_makes_a_row_stale(tmp_path, monkeypatch):
+    _data(tmp_path, monkeypatch, fact_start=TEXT.index("colostrum"))
+    monkeypatch.setattr(facts, "PLANNER_PROMPT", facts.PLANNER_PROMPT + " Changed.")
+    results = {name: ok for name, ok, _ in checks.check_facts()}
+    assert not results["every question segment has facts made from today's inputs"]
 
 
 def test_api_routes(tmp_path, monkeypatch):

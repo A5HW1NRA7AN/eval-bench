@@ -1,5 +1,7 @@
 import pytest
 
+from bench.config import BenchError
+
 from bench.evaluate import check_evidence, gold_chunks, score
 from bench.testbed import CHUNK_CHARS, chunk
 
@@ -27,7 +29,7 @@ def test_gold_chunks_are_the_ones_holding_each_quote():
 def test_stale_evidence_stops_the_evaluation():
     q = {"question_id": "seg-01:q01", "evidence": [{"segment_id": "seg-01", "quote": "keep her shed clean", "start": 22, "end": 41}]}
     check_evidence(q, {"seg-01": SENT})  # the quote is still where it was verified
-    with pytest.raises(SystemExit):
+    with pytest.raises(BenchError):
         check_evidence(q, {"seg-01": "Segment text changed. " + SENT})
 
 

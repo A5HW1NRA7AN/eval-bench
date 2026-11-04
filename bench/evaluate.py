@@ -7,18 +7,20 @@ by how confident the search was. Questions are never dropped because of these re
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import defaultdict
 from typing import Any
 
-from bench.config import DATA_DIR, settings
+from bench.config import DATA_DIR, BenchError, question_types, settings
 from bench.pdf import read_jsonl, write_jsonl
 from bench.questions import QUESTIONS, QUESTIONS_VERSION
 from bench.testbed import COLLECTION, embed, load_chunks, qdrant, search
-from bench.verify import find
+from bench.verify import find, uid
 
 KS = (1, 3, 5, 10)
 REPORT = DATA_DIR / "report.md"
+SMALL = 30  # groups with fewer questions are marked: their scores move a lot from run to run
 
 
 def gold_chunks(question: dict[str, Any], chunks: dict[str, list[dict[str, Any]]]) -> list[set[str]]:
@@ -31,7 +33,7 @@ def check_evidence(question: dict[str, Any], texts: dict[str, str]) -> None:
     """Stop if an evidence quote is no longer at its position in the indexed text: an earlier stage was re-run."""
     for ev in question["evidence"]:
         if find(ev["quote"], texts.get(ev["segment_id"], "")[ev["start"] : ev["end"]]) is None:
-            raise SystemExit(f"{question['question_id']}: its evidence no longer matches the indexed text; "
+            raise BenchError(f"{question['question_id']}: its evidence no longer matches the indexed text; "
                              "re-run the stages after the one you changed (segment, facts, questions, index)")
 
 
@@ -57,6 +59,31 @@ def summary(results: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
             for name, rows in [("all", results), *sorted(groups.items())]]
 
 
+def wilson(successes: float, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% confidence interval of a proportion (Wilson score interval)."""
+    if not n:
+        return 0.0, 0.0
+    p, d = successes / n, 1 + z * z / n
+    centre, half = (p + z * z / (2 * n)) / d, z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def with_intervals(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summary rows with 95% intervals on hit@1 and hit@10, and a mark on groups smaller than SMALL."""
+    out = []
+    for row in rows:
+        low1, high1 = wilson(row["hit@1"] * row["n"], row["n"])
+        low10, high10 = wilson(row["hit@10"] * row["n"], row["n"])
+        out.append({**row, "hit@1 95%": f"{low1:.2f}-{high1:.2f}", "hit@10 95%": f"{low10:.2f}-{high10:.2f}",
+                    "note": f"n<{SMALL}" if row["n"] < SMALL else ""})
+    return out
+
+
+def test_set_id(questions: list[dict[str, Any]]) -> str:
+    """One id for the exact set of questions: it changes when any question is added, removed or changed."""
+    return uid(sorted(q.get("uid", "") for q in questions))
+
+
 def _table(rows: list[dict[str, Any]]) -> list[str]:
     head = list(rows[0])
     lines = ["| " + " | ".join(head) + " |", "|---" * len(head) + "|"]
@@ -80,7 +107,7 @@ def unanswerable_lines(answerable: list[dict[str, Any]], unanswerable: list[dict
 def run_evaluate() -> None:
     rows = read_jsonl(QUESTIONS)
     if any(row["version"] != QUESTIONS_VERSION for row in rows):
-        raise SystemExit(f"questions.jsonl has rows from an older version: run `bench questions` ({QUESTIONS_VERSION})")
+        raise BenchError(f"questions.jsonl has rows in an older format: run `bench questions` ({QUESTIONS_VERSION})")
     questions = [q for row in rows for q in row["questions"]]
     chunks = load_chunks()
     by_id = {c["chunk_id"]: c for c in chunks}
@@ -88,7 +115,7 @@ def run_evaluate() -> None:
     for c in chunks:
         chunks_by_segment[c["segment_id"]].append(c)
     if not questions:
-        raise SystemExit("no verified questions: run `bench facts` and `bench questions` first")
+        raise BenchError("no verified questions: run `bench facts` and `bench questions` first")
     # chunks cover their segment exactly, so joined they are the indexed segment text
     texts = {sid: "".join(c["text"] for c in sorted(cs, key=lambda c: c["start"])) for sid, cs in chunks_by_segment.items()}
     for q in questions:
@@ -101,7 +128,7 @@ def run_evaluate() -> None:
         found = {"top": hits[:5], "top_score": hits[0][1] if hits else 0.0}
         if q["evidence"]:
             found |= score([cid for cid, _ in hits], gold_chunks(q, chunks_by_segment))
-        results.append({"question_id": q["question_id"], "type": q["type"], "question": q["question"],
+        results.append({"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "question": q["question"],
                         "answerable": bool(q["evidence"]), "expected": [ev["quote"] for ev in q["evidence"]], **found})
     write_jsonl(DATA_DIR / "results.jsonl", results)
     answerable = [r for r in results if r["answerable"]]
@@ -110,10 +137,18 @@ def run_evaluate() -> None:
     lines = [
         "# Search benchmark report", "",
         f"Test bed: local Qdrant `{COLLECTION}`, embeddings `{settings().embed_model}`; questions written by {models} "
-        "and verified by the regex audit. Hit@k: a chunk overlapping the question's evidence quote is in the top k. "
-        "rr: 1 / rank of the first such chunk.", "",
-        *_table(summary(answerable, "type")), "",
+        f"and verified by the regex audit; test set `{test_set_id(questions)}`. Hit@k: a chunk overlapping the "
+        "question's evidence quote is in the top k. rr: 1 / rank of the first such chunk (MRR@10 when averaged). "
+        f"95%: Wilson interval; groups with fewer than {SMALL} questions are marked n<{SMALL}.", "",
+        *_table(with_intervals(summary(answerable, "type"))), "",
     ]
+    if empty := sorted(set(question_types()) - {q["type"] for q in questions}):
+        lines += [f"Switched-on types with no kept question: {', '.join(empty)}.", ""]
+    flagged = [r for r, q in zip(results, questions) if q.get("review", {}).get("verdict") == "flag" and r["answerable"]]
+    if flagged:
+        lines += [f"{len(flagged)} answerable questions carry an AI reviewer flag (AI verdict; the regex audit kept them). "
+                  f"hit@10 for them: {sum(r['hit@10'] for r in flagged) / len(flagged):.2f}; for the rest: "
+                  f"{sum(r['hit@10'] for r in answerable if r not in flagged) / max(len(answerable) - len(flagged), 1):.2f}.", ""]
     multi = [r for r in answerable if len(r["expected"]) > 1]
     if multi:
         lines += [f"Questions with several facts that found every fact in the top 10: {sum(r['all_facts@10'] for r in multi):.0f} of {len(multi)}.", ""]
@@ -127,4 +162,4 @@ def run_evaluate() -> None:
                   for n, (cid, score_) in enumerate(r["top"][:3], start=1)]
         lines.append("")
     REPORT.write_text("\n".join(lines))
-    print(f"scored {len(results)} questions -> {REPORT.relative_to(DATA_DIR.parent)}")
+    print(f"scored {len(results)} questions -> {REPORT}")

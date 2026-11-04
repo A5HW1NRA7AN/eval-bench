@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "openpyxl>=3.1",
     "rich>=13",
+    "openai>=3.38",
 ]
 
 [dependency-groups]
@@ -29,3 +30,4 @@ packages = ["bench"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore:Local mode performs exact:UserWarning"]  # the tests' in-memory Qdrant

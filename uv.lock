@@ -148,6 +148,7 @@ name = "eval-bench"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "openai" },
     { name = "openpyxl" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
@@ -165,6 +166,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "openai", specifier = ">=3.38" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = "==2.59.0" },

@@ -8,6 +8,8 @@ and dash style, which PDFs and models write inconsistently. Anything else that d
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -22,12 +24,18 @@ DIGITS = re.compile(r"(?<![A-Za-z\d])\d+(?:[.,]\d+)*")  # not the 1 of B1: codes
 DATE = re.compile(r"\b(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+)?"
                   r"(?:19|20)\d\d(?:\s*[-–]\s*(?:19|20)?\d\d)?\b", re.I)
 WORD_NUMBERS = {w: str(n) for n, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve".split())}
-YEAR_SPAN = re.compile(r"\b(?:19|20)\d\d-\d\d\b")  # a reporting year such as 2024-25
+YEAR_SPAN = re.compile(r"\b(?:19|20)\d\d[-–]\d\d\b")  # a reporting year such as 2024-25 (hyphen or en dash)
 # Characters that PDFs and models write in several forms.
 VARIANTS = {"'": "['‘’`]", "‘": "['‘’`]", "’": "['‘’`]", '"': "[\"“”]", "“": "[\"“”]", "”": "[\"“”]",
             "-": "[-‐‑–—]", "‐": "[-‐‑–—]", "–": "[-‐‑–—]", "—": "[-‐‑–—]"}
 STOPWORDS = {"what", "which", "when", "where", "does", "should", "with", "from", "that", "this", "have", "their",
              "they", "into", "about", "after", "before", "much", "many", "used", "your", "there", "than"}
+# Questions are English only for now: no Indian-script characters and no romanized-Hindi words.
+INDIC_SCRIPT = re.compile(r"[\u0900-\u0DFF]")  # Devanagari to Sinhala, Gujarati included
+HINGLISH = {"kitna", "kitni", "kitne", "kya", "kyu", "kyon", "kaise", "kaisa", "kaun", "kaunsa", "kaunse", "kaunsi",
+            "kab", "kahan", "hai", "hain", "hota", "hoti", "hote", "chahiye", "karna", "karne", "karein", "dena",
+            "mein", "nahi", "nahin", "bhi", "aur", "doodh", "bhains", "gaay", "bakri", "chara", "wala", "wali", "jyada"}
+ID_TOKEN = re.compile(r"\b[dfqx]\d{1,3}(?:_\d+)?\b")  # the short ids agents see (d8, f3, x12, d8_1), case-sensitive
 NUMBER = re.compile(r"\d|\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
                     r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|"
                     r"ninety|hundred|thousand|lakhs?|crores?|million|billion|dozen|half|twice|double)\b", re.I)
@@ -41,9 +49,23 @@ def pattern(snippet: str) -> re.Pattern[str]:
     return re.compile(joined.replace("[-‐‑–—]", r"[-‐‑–—]\s*"))
 
 
-def find(snippet: str, text: str) -> tuple[int, int] | None:
-    match = pattern(snippet).search(text) if snippet.strip() else None
+def find(snippet: str, text: str, whole: bool = False) -> tuple[int, int] | None:
+    """(start, end) of the snippet in the text, or None. With `whole`, it must not start or end inside a
+    larger word or number ("1 kg" doesn't match inside "11 kg")."""
+    if not snippet.strip():
+        return None
+    regex = pattern(snippet)
+    if whole:
+        first, last = snippet.strip()[0], snippet.strip()[-1]
+        regex = re.compile((r"(?<![\w.])(?<!\d[-‐‑–—])" if first.isalnum() else "") + regex.pattern  # not in "3-5 days"
+                           + (r"(?!\w)(?![.,]\d)" if last.isalnum() else ""))  # not "10" of "10.5"
+    match = regex.search(text)
     return (match.start(), match.end()) if match else None
+
+
+def uid(*parts: Any) -> str:
+    """A short content id: the same content always gets the same id, across runs."""
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()[:12]
 
 
 def pages_of(segment: dict[str, Any], start: int, end: int) -> list[int]:
@@ -95,6 +117,18 @@ def claim_problem(claim: str, quote: str, segment: dict[str, Any]) -> str | None
     return None
 
 
+def kept_fact_problem(fact: dict[str, Any], segment: dict[str, Any]) -> str | None:
+    """Why a kept fact no longer passes the fact rules (the rules or the segment text changed), or None."""
+    quote = fact["quote"]
+    if segment["text"][fact["start"] : fact["end"]] != quote:
+        return "quote is no longer at its recorded position"
+    if len(quote) > MAX_QUOTE_CHARS:
+        return f"quote longer than {MAX_QUOTE_CHARS} chars"
+    if table_row(quote):
+        return "quote is a table row, not a sentence"
+    return claim_problem(fact["claim"], quote, segment)
+
+
 def verify_facts(segment: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[list[dict], list[dict]]:
     """Cut each fact's quote from its sentence range and keep it if it passes every rule.
     Returns (kept, rejected); kept facts record their quote, position, pages and size."""
@@ -111,10 +145,11 @@ def verify_facts(segment: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[
                   "quote is a table row, not a sentence" if table_row(quote) else
                   claim_problem(claim, quote, segment) or (f"overlaps {overlap}" if overlap else None))
         if reason:
-            rejected.append({**fact, "quote": quote, "reason": reason})
+            rejected.append({**fact, "quote": quote, "reason": reason, "decided_by": "audit"})
             continue
         fact_id = f"{segment['segment_id']}:f{len(kept) + 1:02d}"
-        kept.append({"fact_id": fact_id, **fact, "claim": claim, "quote": quote, "start": span[0], "end": span[1],
+        kept.append({"fact_id": fact_id, "uid": uid(segment["segment_id"], span[0], span[1], claim, quote), **fact,
+                     "claim": claim, "quote": quote, "start": span[0], "end": span[1],
                      "pages": pages_of(segment, *span), "size": size_of(fact, units)})
     return kept, rejected
 
@@ -131,6 +166,14 @@ def _plain(text: str) -> str:
     return " ".join(re.findall(r"\w+", text.lower()))
 
 
+def not_english(text: str) -> str | None:
+    """What makes the text not plain English (an Indian-script letter or romanized-Hindi words), or None."""
+    if match := INDIC_SCRIPT.search(text):
+        return match.group()
+    words = sorted(set(re.findall(r"[a-z]+", text.lower())) & HINGLISH)
+    return ", ".join(words) or None
+
+
 def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules: dict[str, Any],
                      corpus: str | None = None) -> str | None:
     """Why a question fails the audit, or None if it passes: the general rules, then its type's rules
@@ -141,7 +184,7 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
     quotes = [f["quote"] for f in linked]
     # The answer is one span, or several joined by "; "; each must be in a quote. Unanswerable ones have none.
     pieces = [p.strip() for p in q.get("answer", "").split(";") if p.strip()]
-    sources = [{n for n, quote in enumerate(quotes) if find(p, quote)} for p in pieces]
+    sources = [{n for n, quote in enumerate(quotes) if find(p, quote, whole=True)} for p in pieces]
     if rules.get("absent_term"):
         term = q.get("absent_term", "").strip()
         if not term or not _term(term).search(q["question"]):
@@ -152,6 +195,11 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
         return "answer not found in its facts' quotes"
     if any(find(quote, q["question"]) for quote in quotes):
         return "question copies its quote"
+    if ids := sorted(t for t in set(ID_TOKEN.findall(q["question"]))  # "f1 crossbred" or "vitamin d3" from a quote is fine
+                     if not any(re.search(rf"\b{t}\b", quote, re.I) for quote in quotes)):
+        return f"question contains an internal id: {', '.join(ids)}"
+    if rules.get("english_only", True) and (foreign := not_english(q["question"])):
+        return f"question isn't plain English: {foreign}"
     if any(YEAR_SPAN.search(quote) for quote in quotes) and not re.search(r"\b(?:19|20)\d\d", q["question"]):
         return "question drops its quote's year"
     n_words, n_facts = len(q["question"].split()), len(set(q["fact_ids"]))
@@ -183,7 +231,7 @@ def verify_questions(questions: list[dict[str, Any]], facts: dict[str, dict[str,
     for q in questions:
         problem = question_problem(q, facts, types[q["type"]].get("rules", {}), corpus)
         if problem:
-            rejected.append({**q, "reason": problem})
+            rejected.append({**q, "reason": problem, "decided_by": "audit"})
         else:
             kept.append(q)
     return kept, rejected
