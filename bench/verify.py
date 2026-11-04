@@ -35,6 +35,27 @@ INDIC_SCRIPT = re.compile(r"[\u0900-\u0DFF]")  # Devanagari to Sinhala, Gujarati
 HINGLISH = {"kitna", "kitni", "kitne", "kya", "kyu", "kyon", "kaise", "kaisa", "kaun", "kaunsa", "kaunse", "kaunsi",
             "kab", "kahan", "hai", "hain", "hota", "hoti", "hote", "chahiye", "karna", "karne", "karein", "dena",
             "mein", "nahi", "nahin", "bhi", "aur", "doodh", "bhains", "gaay", "bakri", "chara", "wala", "wali", "jyada"}
+# Named answer shapes that templates refer to (templates never hold raw regex).
+_NUM = r"\d[\d,]*(?:\.\d+)?"
+_SPELLED = r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+_TIME_UNIT = r"(?:hours?|hrs?|days?|weeks?|months?|years?)"
+SHAPES = {
+    "money": re.compile(rf"(?:₹|\bRs\.?|\bINR\b|\brupees?\b)\s*{_NUM}|{_NUM}\s*(?:lakhs?|crores?)\b|\b(?:lakhs?|crores?)\s+(?:of\s+)?rupees?", re.I),
+    "percent": re.compile(rf"{_NUM}\s*(?:%|per\s?cent\b|percent\b)", re.I),
+    "ratio": re.compile(r"(?<![\d:.])\d{1,3}\s?:\s?\d{1,3}(?![\d:])(?!\s*(?:am|pm|hrs?)\b)", re.I),  # 60:40, not 10:30 am
+    "age": re.compile(rf"(?:{_NUM}|{_SPELLED})(?:\s*(?:-|–|to)\s*(?:{_NUM}|{_SPELLED}))?\s*{_TIME_UNIT}\b", re.I),
+    "interval": re.compile(r"\b(?:every|once|twice|annually|yearly|monthly|weekly|daily|six[- ]monthly|half[- ]yearly|booster)\b", re.I),
+    "quantity": re.compile(rf"{_NUM}\s*(?:million|lakh|crore|thousand|billion)?\s*(?:tonnes?|tons?|kg|kilograms?|litres?|liters?|grams?|gm|g|heads?|eggs|hectares?|ha)\b", re.I),
+    "rate": re.compile(rf"{_NUM}\s*(?:kg|g|gm|grams?|litres?|liters?|ml|l)\s*(?:/|per)\s*(?:day|animal|capita|head|year|lactation)", re.I),
+    "organisation": re.compile(r"\b[A-Z][A-Z&]{1,}[A-Z0-9]*\b|\b(?:Board|Bank|Ministry|Department|Council|Corporation|Federation|Agency)\b"),
+}
+
+
+def has_shape(names: list[str], text: str) -> bool:
+    """True if the text holds an answer of at least one of the named shapes."""
+    return any(SHAPES[n].search(text) for n in names)
+
+
 ID_TOKEN = re.compile(r"\b[dfqx]\d{1,3}(?:_\d+)?\b")  # the short ids agents see (d8, f3, x12, d8_1), case-sensitive
 NUMBER = re.compile(r"\d|\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
                     r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|"

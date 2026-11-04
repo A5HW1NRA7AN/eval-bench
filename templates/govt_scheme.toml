@@ -1,0 +1,42 @@
+# Government scheme: its aims, who can apply, what they get, who pays and who implements it.
+# Cues are plain words matched at the start of a word; shapes are named answer patterns (bench/verify.py).
+enabled = true
+description = "A government scheme document (guidelines, a summary or FAQs): its aims, who can apply, what they get, who pays and who implements it."
+subject = "the scheme or scheme component as the text names it, e.g. National Livestock Mission (NLM)"
+# Specific words only: generic ones (programme, fund, implement) also fill ordinary chapters.
+signals = ["scheme", "yojana", "subsidy", "subsidies", "eligib", "beneficiar", "grant-in-aid", "subvention",
+           "centrally sponsored", "central sector", "implementing agenc", "financial assistance", "pattern of assistance", "loan"]
+min_density = 3  # calibrated: Dairy Farming ch.1 (scheme passages) 3.6; other chapters at most 1.8
+
+[intents.objective]
+kind = "explanation"
+description = "What the scheme is for."
+cues = ["objective", "aim", "purpose", "launched", "intended"]
+examples = ["What is the objective of {subject}?"]
+
+[intents.eligibility]
+kind = "explanation"
+description = "Who can apply or benefit (individuals, FPOs, SHGs, cooperatives) and on what conditions."
+cues = ["eligib", "beneficiar", "who can apply", "entitled"]
+examples = ["Who can apply for {subject}?"]
+
+[intents.benefit]
+kind = "figure"
+description = "What a beneficiary gets: a subsidy share or ceiling, a grant, a loan or an interest subvention."
+cues = ["subsidy", "assistance", "grant", "loan", "subvention", "incentive"]
+shape = ["money", "percent"]
+examples = ["How much subsidy does {subject} give?"]
+
+[intents.funding_pattern]
+kind = "figure"
+description = "Who pays: the Centre:State share, or the loan and grant parts of the funding."
+cues = ["funding pattern", "share", "grant-in-aid", "centrally sponsored", "central sector", "loan"]
+shape = ["ratio", "percent"]
+examples = ["What is the funding pattern of {subject}?"]
+
+[intents.implementing_agency]
+kind = "figure"
+description = "Which agency implements, sanctions or monitors the scheme."
+cues = ["implement", "nodal agency", "through the", "agency"]
+shape = ["organisation"]
+examples = ["Which agency implements {subject}?"]

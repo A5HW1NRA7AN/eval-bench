@@ -150,7 +150,7 @@ def export() -> None:
 
 @app.command()
 @_command()
-def check(stage: str = typer.Argument(None, help="segment, facts, questions, index or evaluate (all if left out)")) -> None:
+def check(stage: str = typer.Argument(None, help="segment, facts, questions, templates, index or evaluate (all if left out)")) -> None:
     """Check every stage's saved output without the LLM: is it complete, verbatim and in step?"""
     from bench.checks import STAGES, print_checks
 
@@ -158,6 +158,97 @@ def check(stage: str = typer.Argument(None, help="segment, facts, questions, ind
         raise typer.BadParameter(f"choose one of {', '.join(STAGES)}")
     if not print_checks([stage] if stage else None):
         raise typer.Exit(1)
+
+
+templates_app = typer.Typer(no_args_is_help=True, help="Topic templates: what users ask about one kind of document (templates/).")
+app.add_typer(templates_app, name="templates")
+
+
+@templates_app.command("list")
+@_command()
+def templates_list() -> None:
+    """Each template and its intents (on or off), and the sections it applies to (by the rules or by you)."""
+    from bench.segments import load_segments
+    from bench.templates import assigned, is_on, load_topics, templates
+
+    tmpls, topics = templates(), load_topics()
+    for name, t in tmpls.items():
+        intents = ", ".join(i if is_on(topics, name, t, i) else f"{i} (off)" for i in t.intents)
+        typer.echo(f"{name} [{'on' if is_on(topics, name, t) else 'off'}]: {intents}")
+    typer.echo("")
+    for segment in (s for s in load_segments() if s["use_for_questions"]):
+        names, by = assigned(segment, tmpls, topics)
+        typer.echo(f"  {segment['segment_id']}: {', '.join(names) or '-'} ({by})")
+
+
+@templates_app.command("assign")
+@_command(writes=True)
+def templates_assign(section: str = typer.Argument(..., help="A section id, or part of one (e.g. a PDF's name)"),
+                     names: str = typer.Argument(..., help="Templates, comma-separated; 'none' for no template; 'auto' to let the rules decide again")) -> None:
+    """Override the automatic categorisation for the matching sections."""
+    from bench.segments import load_segments
+    from bench.templates import load_topics, save_topics, templates
+
+    tmpls, topics = templates(), load_topics()
+    chosen = [] if names == "none" else [n.strip() for n in names.split(",") if n.strip()]
+    if names != "auto" and (unknown := set(chosen) - set(tmpls)):
+        raise BenchError(f"unknown template: {', '.join(sorted(unknown))} (templates: {', '.join(tmpls)})")
+    matched = [s["segment_id"] for s in load_segments() if s["use_for_questions"] and section.lower() in s["segment_id"].lower()]
+    if not matched:
+        raise BenchError(f"no section used for questions matches {section!r}")
+    for sid in matched:
+        if names == "auto":
+            topics["sections"].pop(sid, None)
+        else:
+            topics["sections"][sid] = chosen
+    save_topics(topics)
+    typer.echo(f"{len(matched)} section(s): {'categorised by the rules' if names == 'auto' else ', '.join(chosen) or 'no template'}")
+
+
+def _switch(name: str, intent: str | None, on: bool) -> None:
+    from bench.templates import load_topics, save_topics, templates
+
+    tmpls, topics = templates(), load_topics()
+    if name not in tmpls or (intent and intent not in tmpls[name].intents):
+        raise BenchError(f"no such template or intent: {name}{'.' + intent if intent else ''}")
+    topics["switches"][f"{name}.{intent}" if intent else name] = on
+    save_topics(topics)
+    typer.echo(f"{name}{'.' + intent if intent else ''} switched {'on' if on else 'off'}")
+
+
+@templates_app.command("on")
+@_command(writes=True)
+def templates_on(name: str, intent: str = typer.Argument(None)) -> None:
+    """Switch a template (or one of its intents) on for this data folder."""
+    _switch(name, intent, True)
+
+
+@templates_app.command("off")
+@_command(writes=True)
+def templates_off(name: str, intent: str = typer.Argument(None)) -> None:
+    """Switch a template (or one of its intents) off for this data folder: no calls, nothing deleted."""
+    _switch(name, intent, False)
+
+
+@templates_app.command("coverage")
+@_command(writes=True)
+def templates_coverage() -> None:
+    """Which intents each section states, and which today's facts and questions cover (code only) -> data/coverage.md."""
+    from collections import Counter
+
+    from bench.facts import FACTS, load_rows
+    from bench.pdf import write_text
+    from bench.questions import QUESTIONS
+    from bench.segments import load_segments
+    from bench.templates import COVERAGE, coverage, coverage_report, load_topics, templates
+
+    tmpls = templates()
+    rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics())
+    write_text(COVERAGE, coverage_report(rows, tmpls))
+    for name in tmpls:
+        counts = Counter(r["status"] for r in rows if r["template"] == name)
+        typer.echo(f"{name}: {', '.join(f'{n} {s}' for s, n in counts.items()) or 'no section assigned'}")
+    typer.echo(f"wrote {COVERAGE}")
 
 
 @app.command()

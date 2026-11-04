@@ -1,0 +1,42 @@
+# Statistical report: figures for a measure, a year and a place (production, growth, shares, yields, rankings).
+# Cues are plain words matched at the start of a word; shapes are named answer patterns (bench/verify.py).
+enabled = true
+description = "A statistical report: values of a measure for a year and a place, its growth, shares, yields and rankings."
+subject = "the measure, e.g. milk production or per capita availability of eggs"
+signals = ["production", "growth", "per capita", "share", "estimate", "lakh", "million tonnes", "percent"]
+min_density = 2
+min_numbers_per_word = 0.10  # calibrated: statistics chapters 0.11-0.70 numbers per word, book chapters at most 0.09
+
+[intents.value_lookup]
+kind = "figure"
+description = "The value of a measure for a year and a place."
+cues = ["production", "estimated", "total", "population", "availability"]
+shape = ["quantity"]
+examples = ["What was India's {subject} in 2024-25?"]
+
+[intents.growth_change]
+kind = "figure"
+description = "How much a measure changed over the previous period."
+cues = ["growth", "increase", "decline", "grew", "compared to"]
+shape = ["percent"]
+examples = ["By how much did India's {subject} grow in 2024-25?"]
+
+[intents.share_contribution]
+kind = "figure"
+description = "The share of a total that comes from a species, state or product."
+cues = ["share", "contribut", "account", "proportion"]
+shape = ["percent"]
+examples = ["What share of India's {subject} came from buffaloes in 2024-25?"]
+
+[intents.per_unit_productivity]
+kind = "figure"
+description = "A rate: per capita availability, yield per animal per day."
+cues = ["per capita", "per animal", "yield", "per day"]
+shape = ["rate"]
+examples = ["What was the {subject} per animal per day in 2024-25?"]
+
+[intents.ranking_top_n]
+kind = "explanation"
+description = "Which states or countries lead, and in what order."
+cues = ["highest", "largest", "top", "leading", "rank"]
+examples = ["Which states had the highest {subject} in 2024-25?"]

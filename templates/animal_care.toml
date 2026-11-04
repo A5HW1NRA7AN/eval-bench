@@ -1,0 +1,40 @@
+# Animal care: a disease, condition or practice, and what a farmer should do about it.
+# A template lists the intents (what users ask about this kind of document). Cues are plain words, matched at
+# the start of a word ("vaccin" matches vaccine and vaccination); shapes are named answer patterns (bench/verify.py).
+# Check edits with `bench check templates`; see what today's facts and questions cover with `bench templates coverage`.
+enabled = true
+description = "An animal-care handbook chapter or advisory: a disease, condition or practice, and what a farmer should do."
+subject = "the disease, condition or practice, e.g. Foot and Mouth Disease (FMD)"
+signals = ["symptom", "disease", "vaccin", "infect", "treat", "deworm", "mastitis", "fever", "veterinar", "prevent"]
+min_density = 6  # signal words per 1,000 words for a section to be categorised as animal care
+
+[intents.symptoms]
+kind = "explanation"
+description = "How a farmer recognises it: the signs, and which animals or ages it affects."
+cues = ["symptom", "clinical sign", "fever", "lesion", "swelling", "discharge"]  # not "signs": "signs of heat" is breeding
+examples = ["What are the signs of {subject} in a cow?", "How do I know if my buffalo has {subject}?"]
+
+[intents.cause_and_spread]
+kind = "explanation"
+description = "What causes it and how it spreads, including into feed or milk."
+cues = ["caused by", "cause", "spread", "transmi", "contaminat"]
+examples = ["How does {subject} spread between animals?"]
+
+[intents.prevention]
+kind = "explanation"
+description = "How to prevent or control it: isolation, hygiene, vector control, feed and housing practices."
+cues = ["prevent", "control", "isolat", "hygien", "disinfect"]
+examples = ["How can a farmer prevent {subject} in a dairy herd?"]
+
+[intents.vaccination_schedule]
+kind = "figure"
+description = "The vaccine, the age at the first dose, the booster and how often to repeat it."
+cues = ["vaccin", "booster", "immuni"]
+shape = ["age", "interval"]
+examples = ["At what age should calves be vaccinated against {subject}?"]
+
+[intents.treatment_first_aid]
+kind = "explanation"
+description = "What to do when an animal has it, and when to call a veterinarian."
+cues = ["treat", "first aid", "drench", "medicine", "antibiotic", "veterinar"]
+examples = ["What should a farmer do when a cow has {subject}?"]

@@ -1,5 +1,6 @@
 import hashlib
 import importlib
+import pkgutil
 import re
 from pathlib import Path
 
@@ -7,13 +8,13 @@ import pydantic_ai.models
 import pytest
 from qdrant_client import QdrantClient
 
+import bench
 from bench import config
 
-# Imported here, before any test patches config: a module first imported mid-test would build its paths from
-# the patched DATA_DIR and keep them after the test.
-MODULES = [importlib.import_module(f"bench.{name}") for name in
-           ("config", "pdf", "segments", "llm", "verify", "facts", "questions", "testbed", "evaluate", "checks",
-            "export", "serve", "cli")]
+# Every bench module, imported here before any test patches config: a module first imported mid-test would
+# build its paths from the patched DATA_DIR and keep them after the test, and a module left out would write
+# to the real data/ folder.
+MODULES = [importlib.import_module(f"bench.{m.name}") for m in pkgutil.iter_modules(bench.__path__) if m.name != "__main__"]
 SETTINGS = config.Settings(llm_url="http://llm.invalid/v1", llm_key="test", llm_model="test-model", reasoning="none",
                            ollama_url="http://ollama.invalid/v1", embed_model="fake-embed", qdrant_url="http://127.0.0.1:6333")
 

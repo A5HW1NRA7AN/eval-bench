@@ -102,6 +102,27 @@ The `facts` and `questions` stages save after every segment (atomically, so a st
 
 **Switching to Gemma 4:** set `LLM_PROVIDER=gemma` in `.env`, or prefix a single command (`LLM_PROVIDER=gemma uv run bench questions`). The remote endpoint is only up in the daytime.
 
+## Topic templates
+
+A template describes what users ask about one *kind* of document, whatever the PDF: `templates/animal_care.toml`, `templates/govt_scheme.toml` and `templates/statistical_report.toml`. Each lists **intents** (e.g. symptoms, vaccination schedule; eligibility, benefit; growth, share). Every intent has:
+- plain **cue words**, matched at the start of a word ("vaccin" matches vaccine and vaccination);
+- for a figure intent, an **answer shape** (money, percent, ratio, age, interval, quantity, rate, organisation), named patterns defined in `bench/verify.py`. Templates never hold raw regex;
+- example questions with `{subject}`.
+
+**Sections are categorised by code, by themselves.** A template applies to a section when its signal words are dense enough there, and, for statistics, when the section is dense with numbers. A book can mix topics, so each section is categorised on its own. You can override this, and switch templates or single intents on and off for your data folder; these choices are stored in `data/topics.json`:
+
+```
+uv run bench templates list                          # each template, its intents, and the sections it applies to
+uv run bench templates assign <section or pdf> animal_care,govt_scheme   # or: none, auto
+uv run bench templates off animal_care symptoms      # on/off for a template or one intent
+uv run bench templates coverage                      # data/coverage.md: which intents each section states and covers
+uv run bench check templates                         # the files and data/topics.json are valid
+```
+
+The coverage report needs no LLM. An intent is *stated* in a section when its cue words occur there. A fact speaks to an intent when a cue is in its quote or in the heading line just above it, and, for figure intents, the quote holds an answer of the intent's shape. Each (section, intent) is marked covered (a kept question), facts only, stated but missing, or not stated. Template-driven generation, which aims the fact agents at the missing intents, comes next.
+
+To add a document type, add a TOML file with the same fields; `bench check templates` reports any mistake.
+
 ## Outputs (`data/`, not committed)
 
 | File | What it holds |
@@ -113,6 +134,7 @@ The `facts` and `questions` stages save after every segment (atomically, so a st
 | `questions.jsonl` | per segment: verified questions, each with its evidence (quotes and positions), and rejected ones |
 | `chunks.jsonl` | the test-bed chunks stored in Qdrant |
 | `results.jsonl`, `report.md` | per-question results and the scored report |
+| `topics.json`, `coverage.md` | your template overrides and switches; the template coverage report |
 | `trace.jsonl` | every agent call: role, prompt, output, tokens, seconds |
 | `bench.xlsx` | all of the above as readable sheets (`bench export`) |
 
@@ -124,4 +146,5 @@ bench/      cli.py · config.py · llm.py · pdf.py · segments.py · facts.py �
 tests/      offline tests (no LLM or Qdrant needed): uv run pytest
 postman/    the Postman collection
 question_types.toml   the question types: count, source, prompt and audit rules per type
+templates/            topic templates: intents, cue words, answer shapes and examples per document type
 ```

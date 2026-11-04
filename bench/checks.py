@@ -20,6 +20,7 @@ from bench.pdf import PAGES, read_jsonl
 from bench.questions import LIBRARY, QUESTIONS, library_fingerprint, split_types
 from bench.questions import fingerprint as questions_fingerprint
 from bench.segments import SEGMENTS, TOC_VERSION, find_toc_pages, slug
+from bench.templates import load_topics, templates
 from bench.testbed import CHUNKS, COLLECTION, qdrant
 from bench.verify import find, kept_fact_problem, question_problem
 
@@ -184,7 +185,23 @@ def check_evaluate() -> list[Check]:
              + f"; report {'written' if REPORT.exists() else 'missing'}")]
 
 
-STAGES = {"segment": check_segment, "facts": check_facts, "questions": check_questions, "index": check_index,
+def check_templates() -> list[Check]:
+    """Templates: every file in templates/ is valid, and the overrides in data/topics.json name known sections and templates."""
+    try:
+        tmpls = templates()
+    except BenchError as exc:
+        return [("templates/ are valid", False, str(exc))]
+    topics = load_topics()
+    sections = {s["segment_id"] for s in _rows(SEGMENTS)}
+    bad = [f"{sid}: {names}" for sid, names in topics["sections"].items() if sid not in sections or set(names) - set(tmpls)]
+    bad += [key for key in topics["switches"] if key.split(".")[0] not in tmpls
+            or ("." in key and key.split(".", 1)[1] not in tmpls[key.split(".")[0]].intents)]
+    return [("templates/ are valid", True, ", ".join(f"{n} ({len(t.intents)} intents)" for n, t in tmpls.items()) or "no templates"),
+            ("data/topics.json names known sections, templates and intents", not bad, ", ".join(bad[:3]) or
+             f"{len(topics['sections'])} overrides, {len(topics['switches'])} switches")]
+
+
+STAGES = {"segment": check_segment, "facts": check_facts, "questions": check_questions, "templates": check_templates, "index": check_index,
           "evaluate": check_evaluate}
 
 
