@@ -37,7 +37,14 @@ from bench.config import (
 )
 from bench.pdf import read_jsonl, write_jsonl
 from bench.segments import heading_path, load_segments, page_at, parts, sentences
-from bench.verify import kept_fact_problem, span_of, uid, verify_facts
+from bench.verify import (
+    kept_fact_problem,
+    span_of,
+    starts_with_values,
+    table_header,
+    uid,
+    verify_facts,
+)
 
 FACTS = DATA_DIR / "facts.jsonl"
 FACTS_VERSION = "facts-v5"  # the row format; part of every row's fingerprint
@@ -217,7 +224,7 @@ def review(agent: Agent[Any, Reviews], segment: dict[str, Any], found: list[dict
     and the fact still goes to the audit. Facts whose sentence range can't be cut aren't shown to the
     reviewer (the audit rejects them)."""
     units = {u["id"]: u for u in sentences(segment["text"])}
-    listing = [{"id": f"f{i}", "claim": f["claim"], "quote": _flat(segment["text"][span[0] : span[1]])}
+    listing = [{"id": f"f{i}", "claim": f["claim"], "quote": _flat(with_header(segment["text"], *span))}
                for i, f in enumerate(found, start=1) if isinstance(span := span_of(f, units), tuple)]
     verdicts = {}
     if listing:
@@ -236,6 +243,17 @@ def review(agent: Agent[Any, Reviews], segment: dict[str, Any], found: list[dict
             f = {**f, "review": {"verdict": "keep"}}
         reviewed.append(f)
     return reviewed
+
+
+def paragraph_ids(ids: list[str]) -> set[str]:
+    """The planner's paragraph ids as the text numbers them ('[p3]' and ' p3' are 'p3')."""
+    return {i.strip().strip("[]").strip() for i in ids}
+
+
+def with_header(text: str, start: int, end: int) -> str:
+    """The text from start to end, after its table's header rows when it is a table row."""
+    header = table_header(text, start) if starts_with_values(text[start:end]) else None
+    return f"{text[header[0] : header[1]]}\n{text[start:end]}" if header else text[start:end]
 
 
 def still_valid(row: dict[str, Any], segment: dict[str, Any]) -> bool:
@@ -269,7 +287,7 @@ def run_facts(doc: str | None = None, max_facts: int | None = None, force: bool 
             label = f"{sid} part {i + 1}/{len(cut)}"
             plan = llm.call("planner", planner, planner_prompt(part, inside, text, found, wanted), label)
             for topic in plan.topics[:wanted]:
-                chosen = [u for u in inside if u["id"].split(".")[0] in topic.paragraphs]
+                chosen = [u for u in inside if u["id"].split(".")[0] in paragraph_ids(topic.paragraphs)]
                 if not chosen:
                     continue  # the planner named paragraphs that aren't in this part
                 heading = heading_path(segment, page_at(segment, chosen[0]["start"]))  # where the topic is, not where the part starts

@@ -121,7 +121,7 @@ def evaluate() -> None:
 
 @app.command()
 @_command(writes=True)
-def run() -> None:
+def run(no_templates: bool = typer.Option(False, "--no-templates", help="Skip the template questions stage")) -> None:
     """Run every stage in order, checking each stage's output before the next one starts."""
     from bench.checks import print_checks
     from bench.evaluate import run_evaluate
@@ -129,10 +129,11 @@ def run() -> None:
     from bench.facts import run_facts
     from bench.questions import run_questions
     from bench.segments import run_segments
+    from bench.templates import run_templates
     from bench.testbed import run_index
 
-    stages = {"segment": run_segments, "facts": run_facts, "questions": run_questions, "index": run_index,
-              "evaluate": run_evaluate}
+    stages = {"segment": run_segments, "facts": run_facts, "questions": run_questions,
+              **({} if no_templates else {"templates": run_templates}), "index": run_index, "evaluate": run_evaluate}
     for name, stage in stages.items():
         typer.echo(f"\n== {name}")
         stage()
@@ -164,6 +165,15 @@ def check(stage: str = typer.Argument(None, help="segment, facts, questions, tem
 
 templates_app = typer.Typer(no_args_is_help=True, help="Topic templates: what users ask about one kind of document (templates/).")
 app.add_typer(templates_app, name="templates")
+
+
+@templates_app.command("run")
+@_command(writes=True)
+def templates_run(doc: str = DOC, force: bool = FORCE) -> None:
+    """Facts and questions aimed at each section's switched-on intents -> data/templates.jsonl."""
+    from bench.templates import run_templates
+
+    run_templates(doc=doc, force=force)
 
 
 @templates_app.command("list")
@@ -244,6 +254,7 @@ def templates_coverage() -> None:
     from bench.segments import load_segments
     from bench.templates import (
         COVERAGE,
+        ROWS,
         coverage,
         coverage_report,
         load_topics,
@@ -251,7 +262,7 @@ def templates_coverage() -> None:
     )
 
     tmpls = templates()
-    rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics())
+    rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics(), load_rows(ROWS))
     write_text(COVERAGE, coverage_report(rows, tmpls))
     for name in tmpls:
         counts = Counter(r["status"] for r in rows if r["template"] == name)

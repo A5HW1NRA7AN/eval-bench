@@ -28,7 +28,7 @@ from bench.config import DATA_DIR, BenchError, question_types
 from bench.facts import FACTS, audit_line, load_rows, run_each, todo
 from bench.pdf import PAGES, read_jsonl, write_jsonl
 from bench.segments import load_segments
-from bench.verify import question_problem, uid, verify_questions
+from bench.verify import evidence_text, question_problem, uid, verify_questions
 
 QUESTIONS = DATA_DIR / "questions.jsonl"
 QUESTIONS_VERSION = "questions-v7"  # the row format; part of every row's fingerprint
@@ -127,9 +127,10 @@ def library_fingerprint(types: dict[str, dict], facts_rows: list[dict[str, Any]]
     return fingerprint(types, [f for row in facts_rows for f in row["facts"]], json.dumps(titles, sort_keys=True))
 
 
-def _listing(facts: dict[str, dict[str, Any]], titles: dict[str, str] | None = None) -> str:
+def listing(facts: dict[str, dict[str, Any]], titles: dict[str, str] | None = None) -> str:
     rows = [{"id": k, **({"section": titles[f["fact_id"].rsplit(":", 1)[0]]} if titles else {}),
-             "claim": f["claim"], "quote": " ".join(f["quote"].split())} for k, f in facts.items()]
+             "claim": f["claim"], "quote": " ".join(evidence_text(f).split()),
+             **{k: f[k] for k in ("subject", "example") if k in f}} for k, f in facts.items()]
     return json.dumps(rows, ensure_ascii=False, indent=1)
 
 
@@ -147,7 +148,7 @@ def write(agents: dict[str, Agent], types: dict[str, dict], name: str, title: st
         return []
     memory = "\n".join(f"- [{q['type']}, {', '.join(q['fact_ids'])}] {q['question']}" for q in asked) or "(none yet)"
     prompt = (f"SECTION: {title}\n\nQUESTIONS ALREADY WRITTEN:\n{memory}\n\n"
-              f"Write at most {t['count']} questions.\n\nFACTS:\n{_listing(facts, titles)}")
+              f"Write at most {t['count']} questions.\n\nFACTS:\n{listing(facts, titles)}")
     out = llm.call(f"{name} writer", agents[name], prompt, label)
     return [{"type": name, **d.model_dump()} for d in out.questions[: t["count"]]]
 
@@ -160,7 +161,7 @@ def review(reviewer: Agent[Any, Reviews], title: str, drafts: list[dict[str, Any
         return []
     listing = [{"id": f"d{i}", "type": d["type"], "question": d["question"], "answer": d["answer"] or "(none)",
                 "fact_ids": d["fact_ids"], **({"absent_term": d["absent_term"]} if d.get("absent_term") else {}),
-                "quotes": [" ".join(facts[k]["quote"].split()) for k in d["fact_ids"] if k in facts]}
+                "quotes": [" ".join(evidence_text(facts[k]).split()) for k in d["fact_ids"] if k in facts]}
                for i, d in enumerate(drafts, start=1)]
     prompt = f"SECTION: {title}\n\nQUESTIONS TO REVIEW:\n{json.dumps(listing, ensure_ascii=False, indent=1)}"
     verdicts = {r.id: r for r in llm.call("question reviewer", reviewer, prompt, label).reviews}

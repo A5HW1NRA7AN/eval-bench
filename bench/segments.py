@@ -335,16 +335,39 @@ NOT_AN_END = re.compile(r"(?:\b(?:e\.g|i\.e|viz|etc|approx|nos?|fig|vs|dr|mr|mrs
 INITIAL = re.compile(r"\b[A-Z]\.$")  # "J. Smith"
 
 
+def _units(para: str) -> list[tuple[int, int]]:
+    """(start, end) of each sentence of a paragraph; a table row (cells joined by " | ", bench/pdf.py) is one unit."""
+    pieces: list[tuple[int, int, bool]] = []  # each table row alone, the lines between rows together
+    for line in re.finditer(r"[^\n]*(?:\n|$)", para):
+        if not line.group():
+            break
+        row = " | " in line.group()
+        if pieces and not row and not pieces[-1][2]:
+            pieces[-1] = (pieces[-1][0], line.end(), False)
+        else:
+            pieces.append((line.start(), line.end(), row))
+    units = []
+    for a, b, row in pieces:
+        chunk = para[a:b]
+        cuts = [] if row else [m.start() + 1 for m in SENTENCE_END.finditer(chunk)
+                               if not NOT_AN_END.search(chunk[: m.start() + 1]) and not INITIAL.search(chunk[: m.start() + 1])]
+        bounds = [0, *cuts, len(chunk)]
+        units += [(a + x, a + y) for x, y in zip(bounds, bounds[1:])]
+    return units
+
+
 def sentences(text: str) -> list[dict[str, Any]]:
     """The text cut into paragraphs (at blank lines) and sentences, each with an id such as 'p3.s2' and
-    its (start, end) in the text. Agents point at these ids and the quote is cut here, never retyped."""
+    its (start, end) in the text; each table row is a sentence of its own. Agents point at these ids and the
+    quote is cut here, never retyped."""
     found = []
     for p, para in enumerate((m for m in PARAGRAPH.finditer(text) if m.group().strip()), start=1):
-        cuts = [m.start() + 1 for m in SENTENCE_END.finditer(para.group())
-                if not NOT_AN_END.search(para.group()[: m.start() + 1]) and not INITIAL.search(para.group()[: m.start() + 1])]
-        bounds = [0, *cuts, len(para.group())]
-        for s, (a, b) in enumerate(zip(bounds, bounds[1:]), start=1):
+        s = 0
+        for a, b in _units(para.group()):
             piece = para.group()[a:b]
+            if not piece.strip():
+                continue
+            s += 1
             start = para.start() + a + len(piece) - len(piece.lstrip())
             found.append({"id": f"p{p}.s{s}", "start": start, "end": para.start() + a + len(piece.rstrip())})
     return found

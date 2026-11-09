@@ -23,7 +23,7 @@ examples = ["How does {subject} spread between animals?"]
 [intents.prevention]
 kind = "explanation"
 description = "How to prevent or control it: isolation, hygiene, vector control, feed and housing practices."
-cues = ["prevent", "control", "isolat", "hygien", "disinfect"]
+cues = ["prevent", "control", "protect", "isolat", "hygien", "disinfect"]
 examples = ["How can a farmer prevent {subject} in a dairy herd?"]
 
 [intents.vaccination_schedule]

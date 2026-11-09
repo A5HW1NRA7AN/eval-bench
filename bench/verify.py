@@ -106,6 +106,46 @@ def table_row(quote: str) -> bool:
     return sum(bool(NUMERIC_TOKEN.match(t)) for t in tokens) >= len(tokens) / 2
 
 
+def _numeric_cell(cell: str) -> bool:
+    """A value: every token a number ('239.30', '-0.50', 'NIL'); a year ('2023-24') is a label."""
+    tokens = cell.split()
+    return bool(tokens) and all(NUMERIC_TOKEN.match(t) for t in tokens) and not re.fullmatch(r"(?:19|20)\d\d(?:[-–]\d\d)?", cell)
+
+
+def data_row(line: str) -> bool:
+    """A table line (cells joined by " | ") with values in at least half of its cells."""
+    cells = [c.strip() for c in line.split("|") if c.strip()]
+    values = sum(_numeric_cell(c) for c in cells)
+    return " | " in line and values > 0 and values * 2 >= len(cells)
+
+
+HEADER_LINES = 6  # a table's title and header rows (statistical tables often have a title row and three header rows)
+
+
+def table_header(text: str, start: int) -> tuple[int, int] | None:
+    """(start, end) of the header rows of the table holding the row at `start`: the table lines of its paragraph
+    before the first row of values (at most HEADER_LINES), or None if the table has no such rows."""
+    para_start = text.rfind("\n\n", 0, start) + 2 if "\n\n" in text[:start] else 0
+    first = header_end = None
+    for line in re.finditer(r"[^\n]+", text[para_start:start]):
+        if " | " not in line.group():
+            if first is None:
+                continue  # a caption line before the table
+            break
+        if data_row(line.group()):
+            break
+        first = para_start + line.start() if first is None else first
+        header_end = para_start + line.end()
+    if first is None or text[first:header_end].count("\n") >= HEADER_LINES:
+        return None
+    return first, header_end
+
+
+def evidence_text(fact: dict[str, Any]) -> str:
+    """A fact's quote, after its table's header rows when the quote is a table row."""
+    return f"{fact['header']}\n{fact['quote']}" if fact.get("header") else fact["quote"]
+
+
 def span_of(fact: dict[str, Any], units: dict[str, dict[str, Any]]) -> tuple[int, int] | str:
     """(start, end) of the sentences from `first` to `last`, or why they can't be cut."""
     first, last = units.get(fact["first"]), units.get(fact["last"])
@@ -151,17 +191,30 @@ def claim_problem(claim: str, quote: str, segment: dict[str, Any]) -> str | None
 
 def kept_fact_problem(fact: dict[str, Any], segment: dict[str, Any]) -> str | None:
     """Why a kept fact no longer passes the fact rules (the rules or the segment text changed), or None."""
-    quote = fact["quote"]
-    if segment["text"][fact["start"] : fact["end"]] != quote:
+    quote, text = fact["quote"], segment["text"]
+    if text[fact["start"] : fact["end"]] != quote:
         return "quote is no longer at its recorded position"
-    if len(quote) > MAX_QUOTE_CHARS:
-        return f"quote longer than {MAX_QUOTE_CHARS} chars"
-    if table_row(quote):
-        return "quote is a table row, not a sentence"
-    return claim_problem(fact["claim"], quote, segment)
+    if fact.get("header") and text[fact["header_start"] : fact["header_end"]] != fact["header"]:
+        return "table header is no longer at its recorded position"
+    return table_problem(quote, fact["start"], text) or (
+        f"quote longer than {MAX_QUOTE_CHARS} chars" if len(quote) > MAX_QUOTE_CHARS else
+        claim_problem(fact["claim"], evidence_text(fact), segment))
 
 
-def verify_facts(segment: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[list[dict], list[dict]]:
+def starts_with_values(quote: str) -> bool:
+    """True if the quote's first line is a table row of values (so its meaning is in header rows above it)."""
+    return data_row(quote.strip().split("\n", 1)[0])
+
+
+def table_problem(quote: str, start: int, text: str) -> str | None:
+    """Why a quote can't stand as a fact for being table text, or None: table rows need their header rows, in
+    the quote or above it in the same table; bare numbers without headers say nothing."""
+    if " | " in quote:
+        return "table rows without header rows" if starts_with_values(quote) and table_header(text, start) is None else None
+    return "quote is a table row, not a sentence" if table_row(quote) else None
+
+
+def verify_facts(segment: dict[str, Any], facts: list[dict[str, Any]], prefix: str = "f") -> tuple[list[dict], list[dict]]:
     """Cut each fact's quote from its sentence range and keep it if it passes every rule.
     Returns (kept, rejected); kept facts record their quote, position, pages and size."""
     units = {s["id"]: s for s in sentences(segment["text"])}
@@ -171,17 +224,20 @@ def verify_facts(segment: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[
         quote = segment["text"][span[0] : span[1]] if isinstance(span, tuple) else ""
         overlap = next((k["fact_id"] for k in kept if isinstance(span, tuple)
                         and min(span[1], k["end"]) - max(span[0], k["start"]) > min(span[1] - span[0], k["end"] - k["start"]) / 2), None)
+        header = table_header(segment["text"], span[0]) if isinstance(span, tuple) and starts_with_values(quote) else None
+        table = {"header": segment["text"][header[0] : header[1]], "header_start": header[0], "header_end": header[1]} if header else {}
         reason = ("empty claim" if not claim else
                   span if isinstance(span, str) else
-                  f"quote longer than {MAX_QUOTE_CHARS} chars" if len(quote) > MAX_QUOTE_CHARS else
-                  "quote is a table row, not a sentence" if table_row(quote) else
-                  claim_problem(claim, quote, segment) or (f"overlaps {overlap}" if overlap else None))
+                  table_problem(quote, span[0], segment["text"]) or
+                  (f"quote longer than {MAX_QUOTE_CHARS} chars" if len(quote) > MAX_QUOTE_CHARS else None) or
+                  claim_problem(claim, evidence_text({"quote": quote, **table}), segment) or
+                  (f"overlaps {overlap}" if overlap else None))
         if reason:
             rejected.append({**fact, "quote": quote, "reason": reason, "decided_by": "audit"})
             continue
-        fact_id = f"{segment['segment_id']}:f{len(kept) + 1:02d}"
+        fact_id = f"{segment['segment_id']}:{prefix}{len(kept) + 1:02d}"
         kept.append({"fact_id": fact_id, "uid": uid(segment["segment_id"], span[0], span[1], claim, quote), **fact,
-                     "claim": claim, "quote": quote, "start": span[0], "end": span[1],
+                     "claim": claim, "quote": quote, "start": span[0], "end": span[1], **table,
                      "pages": pages_of(segment, *span), "size": size_of(fact, units)})
     return kept, rejected
 
@@ -194,7 +250,7 @@ def _term(term: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!\w){re.escape(term.strip())}(?!\w)", re.I)
 
 
-def _plain(text: str) -> str:
+def plain(text: str) -> str:
     return " ".join(re.findall(r"\w+", text.lower()))
 
 
@@ -215,7 +271,7 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
     linked = [facts.get(i) for i in q["fact_ids"]]
     if not linked or None in linked:
         return "refers to a fact that isn't verified"
-    quotes = [f["quote"] for f in linked]
+    quotes = [evidence_text(f) for f in linked]  # a table row with its header rows
     # The answer is one span, or several joined by "; "; each must be in a quote. Unanswerable ones have none.
     pieces = [p.strip() for p in q.get("answer", "").split(";") if p.strip()]
     sources = [{n for n, quote in enumerate(quotes) if find(p, quote, whole=True)} for p in pieces]
@@ -227,7 +283,7 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
             return f"\"{term}\" is in the library, so the question may be answerable"
     elif not pieces or not all(sources):
         return "answer not found in its facts' quotes"
-    if any(find(quote, q["question"]) for quote in quotes):
+    if any(find(f["quote"], q["question"]) for f in linked):
         return "question copies its quote"
     if ids := sorted(t for t in set(ID_TOKEN.findall(q["question"]))  # "f1 crossbred" or "vitamin d3" from a quote is fine
                      if not any(re.search(rf"\b{t}\b", quote, re.I) for quote in quotes)):
@@ -253,7 +309,7 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
         asked, source = content_words(q["question"]), content_words(" ".join(quotes))
         if asked and len(asked & source) > rules["max_quote_words"] * len(asked):
             return "too many of the question's words come from the quote"
-    if rules.get("rewrites_source") and _plain(q["question"]) == _plain(q.get("source_question", "")):
+    if rules.get("rewrites_source") and plain(q["question"]) == plain(q.get("source_question", "")):
         return "the rewrite is the same as its source"
     return None
 

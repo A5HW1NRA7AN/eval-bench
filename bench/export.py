@@ -22,6 +22,7 @@ from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl
 from bench.questions import QUESTIONS
 from bench.segments import SEGMENTS
+from bench.templates import ROWS as TEMPLATE_ROWS
 from bench.testbed import CHUNKS
 from bench.verify import reason_group
 
@@ -73,12 +74,13 @@ def flags(items: Any) -> int:
 
 
 def run_export() -> Path:
-    segments, facts, questions = _rows(SEGMENTS), _rows(FACTS), _rows(QUESTIONS)
+    segments, facts, questions, topical = _rows(SEGMENTS), _rows(FACTS), _rows(QUESTIONS), _rows(TEMPLATE_ROWS)
     results, trace = _rows(RESULTS), _rows(TRACE)
     chunks = {c["chunk_id"]: c for c in _rows(CHUNKS)}
     facts_by, questions_by = {r["segment_id"]: r for r in facts}, {r["segment_id"]: r for r in questions}
     scored = {r.get("uid") or r["question_id"]: r for r in results}  # by content id, so stale results don't match
-    answerable = [r for r in results if r.get("answerable", True)]
+    templated = [r for r in results if "template" in r and r.get("answerable", True)]
+    answerable = [r for r in results if r.get("answerable", True) and "template" not in r]
 
     def missed(r: dict[str, Any]) -> bool:  # an answerable question whose evidence wasn't in the top 10: shaded red
         return bool(r.get("answerable", True) and r.get("hit@10") == 0)
@@ -132,8 +134,25 @@ def run_export() -> Path:
     _sheet(book, "Rejected questions", [{"segment_id": r["segment_id"], "reason": q["reason"], "type": q["type"],
                                          "question": q["question"], "answer": q.get("answer"), "fact_ids": ", ".join(q["fact_ids"])}
                                         for r in questions for q in r["rejected"]])
+    if topical:
+        _sheet(book, "Template facts", [{"fact_id": f["fact_id"], "template": f["template"], "intent": f["intent"],
+                                         "subject": f["subject"], "claim": f["claim"], "header": f.get("header"), "quote": f["quote"],
+                                         "pages": f"{f['pages'][0]}-{f['pages'][-1]}", "ai_review": f.get("review", {}).get("verdict"),
+                                         "ai_review_reason": f.get("review", {}).get("reason")} for r in topical for f in r["facts"]])
+        _sheet(book, "Template questions", [
+            {"question_id": q["question_id"], "uid": q["uid"], "template": q["template"], "intent": q["intent"], "subject": q["subject"],
+             "type": q["type"], "question": q["question"], "answer": q.get("answer"), "ai_review": q.get("review", {}).get("verdict"),
+             "ai_review_reason": q.get("review", {}).get("reason"), "evidence": "\n---\n".join(ev["quote"] for ev in q["evidence"]),
+             "first_rank": scored.get(q["uid"], {}).get("first_rank"), **{f"hit@{k}": scored.get(q["uid"], {}).get(f"hit@{k}") for k in KS}}
+            for r in topical for q in r["questions"]], bad=lambda row: missed(scored.get(row["uid"], {})))
+        _sheet(book, "Rejected template items", [{"segment_id": r["segment_id"], "stage": stage, "reason": x["reason"],
+                                                  "intent": x.get("intent"), "text": x.get("question") or x.get("claim"),
+                                                  "quote": x.get("quote")}
+                                                 for r in topical for stage, items in (("fact", r["rejected_facts"]), ("question", r["rejected"]))
+                                                 for x in items])
     _sheet(book, "Results", [
-        {"question_id": r["question_id"], "type": r["type"], "question": r["question"], "answerable": r.get("answerable", True),
+        {"question_id": r["question_id"], "type": r["type"], "intent": r.get("intent"), "question": r["question"],
+         "answerable": r.get("answerable", True),
          "first_rank": r.get("first_rank"), **{f"hit@{k}": r.get(f"hit@{k}") for k in KS}, "rr": r.get("rr"),
          "all_facts@10": r.get("all_facts@10"), "top_score": r["top_score"] if r.get("ranked") else None,
          "expected": "\n---\n".join(r["expected"]),
@@ -144,6 +163,8 @@ def run_export() -> Path:
         _sheet(book, "Metrics by type", summary(answerable, "type"))
         _sheet(book, "Metrics by PDF", summary([{**r, "pdf": pdf_of.get(r["question_id"].rsplit(":", 1)[0], "several PDFs")}
                                                 for r in answerable], "pdf"))
+    if templated:
+        _sheet(book, "Metrics by intent", summary(templated, "intent"))
     rejects = Counter((stage, reason_group(item["reason"])) for stage, rows in (("facts", facts), ("questions", questions))
                       for r in rows for item in r["rejected"])
     _sheet(book, "Audit reasons", [{"stage": s, "reason": reason, "count": n} for (s, reason), n in rejects.most_common()])

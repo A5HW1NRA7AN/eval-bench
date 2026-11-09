@@ -25,6 +25,8 @@ from bench.config import DATA_DIR, ROOT, BenchError, question_types, settings
 from bench.facts import FACTS
 from bench.pdf import PAGES, read_jsonl, write_jsonl, write_text
 from bench.questions import QUESTIONS, QUESTIONS_VERSION
+from bench.templates import ROWS as TEMPLATE_ROWS
+from bench.templates import current_questions
 from bench.testbed import CHUNK_CHARS, COLLECTION, embed, load_chunks, qdrant, search
 from bench.verify import find, reason_group, uid
 
@@ -132,16 +134,19 @@ def stats(fact_rows: list[dict[str, Any]], question_rows: list[dict[str, Any]], 
     }
 
 
-def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]], results: list[dict[str, Any]]) -> Path:
+def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]], results: list[dict[str, Any]],
+             topical: list[dict[str, Any]], templated: list[dict[str, Any]]) -> Path:
     """Keep this run: its inputs, results and report, a manifest and stats.json, in data/runs/<run>/."""
     folder = RUNS / llm.RUN_ID
     folder.mkdir(parents=True, exist_ok=True)
-    for path in (FACTS, QUESTIONS, RESULTS, REPORT):
-        shutil.copy2(path, folder / path.name)
+    for path in (FACTS, QUESTIONS, TEMPLATE_ROWS, RESULTS, REPORT):
+        if path.exists():
+            shutil.copy2(path, folder / path.name)
     pages = read_jsonl(PAGES)
     manifest = {
         "run": llm.RUN_ID, "time": datetime.now().isoformat(timespec="seconds"), "code": _git(),
         "test_set": test_set_id(questions), "questions": len(questions),
+        "template_test_set": test_set_id(topical) if topical else None, "template_questions": len(topical),
         "question_models": sorted({row["model"] for row in question_rows}),
         "test_bed": {"collection": COLLECTION, "embed_model": settings().embed_model, "chunk_chars": CHUNK_CHARS,
                      "ranked": RANKED},
@@ -149,7 +154,15 @@ def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]
         "question_types": {name: t["count"] for name, t in question_types().items()},
     }
     write_text(folder / "manifest.json", json.dumps(manifest, indent=1, ensure_ascii=False))
-    write_text(folder / "stats.json", json.dumps(stats(read_jsonl(FACTS), question_rows, results), indent=1, ensure_ascii=False))
+    numbers = stats(read_jsonl(FACTS), question_rows, results)
+    if topical:
+        template_rows = read_jsonl(TEMPLATE_ROWS)
+        numbers["templates"] = {"facts": {"kept": sum(len(r["facts"]) for r in template_rows),
+                                          "rejected": dict(Counter(reason_group(x["reason"]) for r in template_rows for x in r["rejected_facts"]))},
+                                "questions": {"kept": len(topical),
+                                              "rejected": dict(Counter(reason_group(x["reason"]) for r in template_rows for x in r["rejected"]))},
+                                "retrieval": {"by_intent": with_intervals(summary(templated, "intent"))}}
+    write_text(folder / "stats.json", json.dumps(numbers, indent=1, ensure_ascii=False))
     return folder
 
 
@@ -177,7 +190,9 @@ def run_evaluate() -> None:
     rows = read_jsonl(QUESTIONS)
     if any(row["version"] != QUESTIONS_VERSION for row in rows):
         raise BenchError(f"questions.jsonl has rows in an older format: run `bench questions` ({QUESTIONS_VERSION})")
-    questions = [q for row in rows for q in row["questions"]]
+    general = [q for row in rows for q in row["questions"]]
+    topical = current_questions()  # template questions, scored and reported apart from the general ones
+    questions = general + topical
     chunks = load_chunks()
     by_id = {c["chunk_id"]: c for c in chunks}
     chunks_by_segment: dict[str, list[dict]] = defaultdict(list)
@@ -200,9 +215,13 @@ def run_evaluate() -> None:
             found |= score([cid for cid, _ in hits], gold_chunks(q, chunks_by_segment))
         document = by_segment_file.get(q["evidence"][0]["segment_id"], "?") if q["evidence"] else "none"
         results.append({"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "document": document,
+                        **({"template": q["template"], "intent": f"{q['template']}.{q['intent']}"} if "template" in q else {}),
                         "question": q["question"], "answerable": bool(q["evidence"]),
                         "expected": [ev["quote"] for ev in q["evidence"]], **found})
     write_jsonl(RESULTS, results)
+    templated = [r for r in results if "template" in r and r["answerable"]]
+    results = [r for r in results if "template" not in r]  # from here on: the general questions
+    questions = general
     answerable = [r for r in results if r["answerable"]]
 
     models = ", ".join(f"`{m}`" for m in sorted({row["model"] for row in rows}))
@@ -227,6 +246,11 @@ def run_evaluate() -> None:
     if multi:
         lines += [f"Questions with several facts that found every fact in the top 10: {sum(r['all_facts@10'] for r in multi):.0f} of {len(multi)}.", ""]
     lines += unanswerable_lines(answerable, [r for r in results if not r["answerable"]])
+    if templated:
+        lines += ["## Topic templates", "",
+                  f"{len(templated)} questions aimed at the intents of each section's templates (test set "
+                  f"`{test_set_id(topical)}`), written and audited apart from the general questions above. Per intent:", "",
+                  *_table(with_intervals(summary(templated, "intent"))), ""]
     misses = [r for r in answerable if r["first_rank"] is None or r["first_rank"] > 10]
     lines += [f"## Misses: {len(misses)} of {len(answerable)} questions had no answer chunk in the top 10", ""]
     for r in misses:
@@ -236,5 +260,6 @@ def run_evaluate() -> None:
                   for n, (cid, score_) in enumerate(r["ranked"][:3], start=1)]
         lines.append("")
     write_text(REPORT, "\n".join(lines))
-    folder = save_run(questions, rows, results)
-    print(f"scored {len(results)} questions -> {REPORT}; run kept in {folder.relative_to(DATA_DIR.parent)}")
+    folder = save_run(questions, rows, results, topical, templated)
+    print(f"scored {len(results)} general and {len(topical)} template questions -> {REPORT}; "
+          f"run kept in {folder.relative_to(DATA_DIR.parent)}")

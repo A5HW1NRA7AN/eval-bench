@@ -5,7 +5,17 @@ from typer.testing import CliRunner
 
 from bench import cli, segments, templates
 from bench.config import BenchError
-from bench.templates import assigned, coverage, fact_intents
+from bench.templates import (
+    active,
+    assigned,
+    coverage,
+    fact_intents,
+    plan_and_extract,
+    styles,
+    subject_names,
+    template_fact_problem,
+    template_question_problem,
+)
 from bench.templates import templates as load_templates
 from bench.verify import SHAPES, not_english, uid
 
@@ -152,3 +162,85 @@ def test_cli_assigns_switches_and_checks(isolated, monkeypatch):
     assert json.loads(templates.TOPICS.read_text())["sections"] == {}
     listing = runner.invoke(cli.app, ["templates", "list"])
     assert "symptoms (off)" in listing.output and "book-01: animal_care (rules)" in listing.output
+
+
+def _fact(text: str, quote: str, **extra) -> dict:
+    return {"fact_id": "book-01:tf01", "quote": quote, "start": text.index(quote), "end": text.index(quote) + len(quote), **extra}
+
+
+def test_the_intent_audit_needs_a_cue_a_shape_and_the_subject():
+    text = "Foot and Mouth Disease\n\nVaccinate calves at 4 months of age, with a booster every six months."
+    seg = {**DISEASE, "text": text, "headings": [], "page_spans": [{"page": 1, "start": 0, "end": len(text)}], "pages": [1, 1]}
+    quote = "Vaccinate calves at 4 months of age, with a booster every six months."
+    fact = _fact(text, quote, template="animal_care", intent="vaccination_schedule", subject="Foot and Mouth Disease (FMD)")
+    assert template_fact_problem(fact, seg, REPO) is None  # the subject is named in the heading line above
+    assert "isn't named" in template_fact_problem({**fact, "subject": "Lumpy Skin Disease"}, seg, REPO)
+    assert template_fact_problem({**fact, "intent": "symptoms"}, seg, REPO).startswith("no cue word")
+    shapeless = "Foot and Mouth Disease\n\nVaccination protects the whole herd from the disease."
+    fact = _fact(shapeless, "Vaccination protects the whole herd from the disease.", template="animal_care",
+                 intent="vaccination_schedule", subject="Foot and Mouth Disease")
+    assert template_fact_problem(fact, {**seg, "text": shapeless}, REPO) == "no age or interval in the quote"
+    assert subject_names("Foot and Mouth Disease (FMD)") == ["Foot and Mouth Disease (FMD)", "Foot and Mouth Disease", "FMD"]
+
+
+def test_a_table_row_takes_its_unit_from_the_header():
+    text = "Milk production by year\n\nYear | Milk production (million tonnes)\n2024-25 | 247.87"
+    fact = _fact(text, "2024-25 | 247.87", header="Year | Milk production (million tonnes)",
+                 header_start=text.index("Year |"), template="statistical_report", intent="value_lookup", subject="milk production")
+    seg = {**STATS, "text": text, "headings": [], "page_spans": [{"page": 1, "start": 0, "end": len(text)}], "pages": [1, 1]}
+    assert template_fact_problem(fact, seg, REPO) is None
+
+
+def test_only_parts_that_state_a_switched_on_intent_cost_a_call(monkeypatch):
+    from pydantic_ai import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from bench import llm
+    calls = []
+    monkeypatch.setattr(llm, "model", lambda: FunctionModel(lambda m, i: calls.append(1) or ModelResponse(parts=[TextPart('{"topics": []}')])))
+    seg = {**GENERAL, "headings": [], "pages": [1, 1], "page_spans": [{"page": 1, "start": 0, "end": len(GENERAL["text"])}]}
+    assert plan_and_extract(seg, "animal_care", REPO["animal_care"], list(REPO["animal_care"].intents), None) == [] and not calls
+    seg = {**seg, "text": DISEASE["text"], "page_spans": [{"page": 1, "start": 0, "end": len(DISEASE["text"])}]}
+    plan_and_extract(seg, "animal_care", REPO["animal_care"], ["prevention"], None)
+    assert len(calls) == 1
+    assert active(DISEASE, REPO, {"switches": {"animal_care.symptoms": False}, "sections": {}}) == {
+        "animal_care": ["cause_and_spread", "prevention", "vaccination_schedule", "treatment_first_aid"]}
+
+
+def test_a_template_question_names_its_subject_and_is_not_a_general_question():
+    fact = {"fact_id": "s:tf01", "quote": "A dry floor prevents mastitis.", "subject": "mastitis"}
+    kinds = {"direct": {"rules": {"facts": [1, 1]}}}
+    q = {"type": "direct", "question": "How can a farmer prevent mastitis?", "answer": "A dry floor prevents mastitis", "fact_ids": ["s:tf01"]}
+    assert template_question_problem(q, {"s:tf01": fact}, kinds, "", set()) is None
+    assert template_question_problem({**q, "question": "How can udder infection be prevented?"}, {"s:tf01": fact}, kinds, "", set()).startswith("doesn't name")
+    assert template_question_problem(q, {"s:tf01": fact}, kinds, "", {"how can a farmer prevent mastitis"}) == "same as a general question"
+    with pytest.raises(BenchError, match="aren't question types"):
+        styles({"x": REPO["animal_care"].model_copy(update={"styles": {"noisy": 1}})})
+
+
+def test_a_subject_is_named_in_any_case_or_number():
+    from bench.templates import names
+    assert names("Aflatoxins", "to prevent aflatoxin contamination") and names("milk production", "Milk Production (MT)")
+    assert names("Foot and Mouth Disease (FMD)", "FMD vaccine") and names("Lumpy skin disease", "lumpy-skin disease")
+    assert not names("Mastitis", "the udder was swollen") and not names("cow", "cowpea fodder")
+
+
+def test_a_list_under_a_disease_and_symptoms_heading_counts_but_a_distant_heading_does_not():
+    bullets = "\n".join(f"• Sign {n}: the animal stands apart from the herd." for n in range(8))
+    text = f"A. RUMEN ACIDOSIS\n\nSymptoms:\n{bullets}\n• Sudden drop in feed intake and milk yield."
+    quote = "• Sudden drop in feed intake and milk yield."
+    seg = {**DISEASE, "title": "Metabolic disorders", "text": text, "headings": [], "pages": [1, 1],
+           "page_spans": [{"page": 1, "start": 0, "end": len(text)}]}
+    fact = _fact(text, quote, template="animal_care", intent="symptoms", subject="Rumen acidosis")
+    assert template_fact_problem(fact, seg, REPO) is None
+    far = "A. RUMEN ACIDOSIS\n\n" + "Cows were fed hay and grain on most farms in the district. " * 30 + f"\n\n{quote}"
+    fact = _fact(far, quote, template="animal_care", intent="symptoms", subject="Rumen acidosis")
+    assert template_fact_problem(fact, {**seg, "text": far, "page_spans": [{"page": 1, "start": 0, "end": len(far)}]}, REPO).startswith("no cue")
+
+
+def test_a_question_may_name_its_subject_by_one_of_its_words():
+    from bench.templates import mentions
+    assert mentions("wool production", "By what percentage did India's wool output grow in 2024-25?")
+    assert mentions("JOHNE’S DISEASE", "What are the signs of Johne's disease in cattle?")
+    assert not mentions("Aflatoxins", "What are the two main stages of mycotoxin control?")
+    assert not mentions("DYSTOCIA", "When do I need to call the vet during a difficult birth?")

@@ -200,3 +200,39 @@ def test_garbled_model_text_never_passes_the_audit():
     fact = {"fact_id": "s:f01", "quote": segment["text"]}
     q = {"question": "How cold should milk be kept?\x19", "answer": "5°C", "fact_ids": ["s:f01"]}
     assert question_problem(q, {"s:f01": fact}, {}).startswith("has a control character")
+
+
+TABLE = ("Table 3: Milk production in India\n\nYear | Milk (million tonnes) | Growth (%)\n2023-24 | 239.30 | 3.78\n"
+         "2024-25 | 247.87 | 3.58\n\nUttar Pradesh | 38.78\nSource: DAHD.")
+TABLE_SEGMENT = {"segment_id": "stats-01", "title": "Highlights", "file_name": "stats.pdf", "headings": [], "pages": [1, 1],
+                 "text": TABLE, "page_spans": [{"page": 1, "start": 0, "end": len(TABLE)}]}
+
+
+def test_table_rows_are_facts_with_their_header_rows_but_bare_rows_are_not():
+    from bench.segments import sentences
+    units = {TABLE[u["start"] : u["end"]]: u["id"] for u in sentences(TABLE)}
+    row, bare = units["2024-25 | 247.87 | 3.58"], units["Uttar Pradesh | 38.78"]
+    head = units["Year | Milk (million tonnes) | Growth (%)"]
+    kept, rejected = verify_facts(TABLE_SEGMENT, [
+        {"claim": "India's milk production was 247.87 million tonnes in 2024-25.", "first": row, "last": row},
+        {"claim": "Uttar Pradesh produced 38.78.", "first": bare, "last": bare}])
+    assert [(f["quote"], f["header"]) for f in kept] == [("2024-25 | 247.87 | 3.58", "Year | Milk (million tonnes) | Growth (%)")]
+    assert TABLE[kept[0]["header_start"] : kept[0]["header_end"]] == kept[0]["header"]
+    assert [r["reason"] for r in rejected] == ["table rows without header rows"]
+    (whole,), _ = verify_facts(TABLE_SEGMENT, [{"claim": "Milk production rose from 239.30 to 247.87 million tonnes "
+                                                         "between 2023-24 and 2024-25.", "first": head, "last": row}])
+    assert "header" not in whole and whole["quote"].startswith("Year |")  # the quote holds its own header rows
+    question = {"question": "What was India's milk production?", "answer": "247.87", "fact_ids": ["s:f01"]}
+    assert question_problem(question, {"s:f01": kept[0]}, {}) == "question drops its quote's year"  # the year is in the row
+
+
+def test_a_statistical_table_with_a_title_row_and_three_header_rows_has_its_header_found():
+    from bench.verify import table_header
+    text = ("Table 14: Share | of livestock | in GVA\nYear | GVA - Total | GVA - Livestock\n | (Rs in Billion) | (Rs in Billion)\n"
+            " |  | (at 2011-12 prices)\n2023-24 | 161515 | 7275")
+    start, end = table_header(text, text.index("2023-24 | 161515"))
+    assert text[start:end].startswith("Table 14") and text[end - 19 : end] == "(at 2011-12 prices)"
+
+
+def test_bracketed_paragraph_ids_from_the_planner_still_match():
+    assert facts.paragraph_ids(["[p3]", " p4 ", "p5"]) == {"p3", "p4", "p5"}

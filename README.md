@@ -37,7 +37,7 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
 5. **evaluate**: each question is embedded and searched. Gold chunks are the ones that overlap its evidence quote, so scoring needs no judging. The report shows hit@1/3/5/10 and MRR by question type, plus every miss with what came back instead.
 
 **The regex audit:**
-- **Facts:** the quote is cut by code from the sentence range the agent points at, so it is always the PDF's own text. The range must exist and be at most 1,200 characters, and the quote can't be a bare table row (mostly numbers). The claim can't start with a pronoun or have a value its quote lacks. Any date, year or acronym it names must appear in the section. A fact that overlaps a kept one by more than half is dropped.
+- **Facts:** the quote is cut by code from the sentence range the agent points at, so it is always the PDF's own text. The range must exist and be at most 1,200 characters. A table row is a sentence of its own: rows of values are kept with their table's header rows (cut by code and recorded with the fact), and bare numbers without headers are rejected. The claim can't start with a pronoun or have a value its quote lacks. Any date, year or acronym it names must appear in the section. A fact that overlaps a kept one by more than half is dropped.
 - **Questions:** each must refer to verified facts. Its answer is a single span, or several joined by `; `, and each span must appear in their quotes. No question may copy its quote, and a question whose quote states a reporting year (e.g. 2024-25) must name a year. Each type then has its own rules in `question_types.toml`, for example:
   - keyword queries are 2–5 words;
   - precise answers contain a number, in digits or as a number word (e.g. `four`, `twice`, `lakh`);
@@ -115,11 +115,14 @@ A template describes what users ask about one *kind* of document, whatever the P
 uv run bench templates list                          # each template, its intents, and the sections it applies to
 uv run bench templates assign <section or pdf> animal_care,govt_scheme   # or: none, auto
 uv run bench templates off animal_care symptoms      # on/off for a template or one intent
+uv run bench templates run                           # facts and questions aimed at each section's intents (--doc, --force)
 uv run bench templates coverage                      # data/coverage.md: which intents each section states and covers
 uv run bench check templates                         # the files and data/topics.json are valid
 ```
 
-The coverage report needs no LLM. An intent is *stated* in a section when its cue words occur there. A fact speaks to an intent when a cue is in its quote or in the heading line just above it, and, for figure intents, the quote holds an answer of the intent's shape. Each (section, intent) is marked covered (a kept question), facts only, stated but missing, or not stated. Template-driven generation, which aims the fact agents at the missing intents, comes next.
+The coverage report needs no LLM. An intent is *stated* in a section when its cue words occur there. A fact speaks to an intent when a cue is in its quote or in the heading line just above it, and, for figure intents, the quote holds an answer of the intent's shape. Each (section, intent) is marked covered (a kept question), facts only, stated but missing, or not stated.
+
+**Template questions** (`bench templates run`, part of `bench run` unless `--no-templates`) are written alongside the general ones. In each part of a section where a switched-on intent's cue words occur (other parts cost no call), an intent planner picks topics, each an intent and its subject (e.g. a disease, a scheme, a measure). The fact extractor and reviewer write and review one fact per topic; a table row can be a fact. The regex audit adds three rules to the fact rules: a cue word in the quote, its table header, the heading line above or its TOC headings; a figure intent's answer shape; and the subject named in the quote, its headings or the document title. Questions are written in the template's `styles` (question types, `direct` and `paraphrased` by default), with the intent's example question as a guide, and must also name their subject and differ from every general question. They are scored in their own report section (`Topic templates`, per intent), so the general headline stays comparable. Output: `data/templates.jsonl`; ids `<section>:tf01` (facts) and `<section>:t01` (questions).
 
 To add a document type, add a TOML file with the same fields; `bench check templates` reports any mistake.
 
@@ -137,6 +140,7 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 | `runs/<run>/` | each `bench evaluate`: the facts, questions, results and report it scored, `manifest.json` (code, models, test set, PDFs) and `stats.json` (audit rejections by rule, AI flags, scores) |
 | `cache/` | every LLM answer, keyed by model, settings, instructions, schema and prompt |
 | `topics.json`, `coverage.md` | your template overrides and switches; the template coverage report |
+| `templates.jsonl` | per section: template facts and questions (with template, intent and subject) and rejected ones |
 | `trace.jsonl` | every agent call: role, prompt, output, tokens, seconds |
 | `bench.xlsx` | all of the above as readable sheets (`bench export`) |
 

@@ -18,7 +18,11 @@ from bench.pdf import PAGES, read_jsonl
 from bench.questions import LIBRARY, QUESTIONS, library_fingerprint, split_types
 from bench.questions import fingerprint as questions_fingerprint
 from bench.segments import INGEST, SEGMENTS
-from bench.templates import load_topics, templates
+from bench.templates import ROWS as TEMPLATE_ROWS
+from bench.templates import active, load_topics, row_problems, templates
+from bench.templates import current_questions as current_template_questions
+from bench.templates import fingerprint as template_fingerprint
+from bench.templates import inputs as template_inputs
 from bench.testbed import CHUNKS, COLLECTION, qdrant
 from bench.verify import find, kept_fact_problem, question_problem, reason_group
 
@@ -164,7 +168,7 @@ def check_evaluate() -> list[Check]:
     if not RESULTS.exists():
         return _missing(RESULTS, "evaluate")
     scored = [r.get("uid") for r in read_jsonl(RESULTS)]
-    current = [q.get("uid") for r in _rows(QUESTIONS) for q in r["questions"]]
+    current = [q.get("uid") for r in _rows(QUESTIONS) for q in r["questions"]] + [q.get("uid") for q in current_template_questions()]
     if None in scored or None in current:  # made before content ids: they can't be matched
         return [("every current question is scored", False, "questions or results have no content id: run `bench questions` "
                  "and `bench evaluate`")]
@@ -186,9 +190,27 @@ def check_templates() -> list[Check]:
     bad = [f"{sid}: {names}" for sid, names in topics["sections"].items() if sid not in sections or set(names) - set(tmpls)]
     bad += [key for key in topics["switches"] if key.split(".")[0] not in tmpls
             or ("." in key and key.split(".", 1)[1] not in tmpls[key.split(".")[0]].intents)]
-    return [("templates/ are valid", True, ", ".join(f"{n} ({len(t.intents)} intents)" for n, t in tmpls.items()) or "no templates"),
-            ("data/topics.json names known sections, templates and intents", not bad, ", ".join(bad[:3]) or
-             f"{len(topics['sections'])} overrides, {len(topics['switches'])} switches")]
+    checks = [("templates/ are valid", True, ", ".join(f"{n} ({len(t.intents)} intents)" for n, t in tmpls.items()) or "no templates"),
+              ("data/topics.json names known sections, templates and intents", not bad, ", ".join(bad[:3]) or
+               f"{len(topics['sections'])} overrides, {len(topics['switches'])} switches")]
+    if not SEGMENTS.exists():
+        return checks
+    tmpls, topics, kinds, corpus, general = template_inputs()
+    rows = {r["segment_id"]: r for r in _rows(TEMPLATE_ROWS)}
+    used = [s for s in _rows(SEGMENTS) if s["use_for_questions"]]
+    on = {s["segment_id"]: active(s, tmpls, topics) for s in used}
+    stale = [s["segment_id"] for s in used if on[s["segment_id"]] and (s["segment_id"] not in rows
+             or rows[s["segment_id"]].get("fingerprint") != template_fingerprint(s, on[s["segment_id"]], tmpls, kinds))]
+    failing = [p for s in used if s["segment_id"] in rows and on[s["segment_id"]]
+               for p in row_problems(rows[s["segment_id"]], s, tmpls, kinds, corpus, general)]
+    kept = [q for s in used if on[s["segment_id"]] for q in rows.get(s["segment_id"], {}).get("questions", [])]
+    facts = sum(len(rows.get(sid, {}).get("facts", [])) for sid in on if on[sid])
+    return checks + [
+        ("every section with a switched-on template has template questions made from today's inputs", not stale,
+         f"{sum(map(bool, on.values()))} sections with templates" + (f"; stale or missing: {stale[:3]} (run `bench templates run`)" if stale else "")),
+        ("every template fact and question still passes the audit", not failing,
+         f"{facts} facts, {len(kept)} questions" + (f"; failing: {failing[:3]}" if failing else "")),
+    ]
 
 
 STAGES = {"segment": check_segment, "facts": check_facts, "questions": check_questions, "templates": check_templates, "index": check_index,

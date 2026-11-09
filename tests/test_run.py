@@ -2,6 +2,7 @@
 (see conftest.py), plus the safety net around it: the run lock, failing sections, outages and atomic writes."""
 
 import json
+import re
 
 import pymupdf
 import pytest
@@ -32,7 +33,14 @@ def _pdf(path):
 def _agents(messages, info):
     """Every agent's reply, told apart by its instructions."""
     system, prompt = messages[-1].instructions, messages[-1].parts[-1].content
-    if system.startswith("You plan fact extraction"):
+    if system.startswith("You plan a search benchmark for one kind"):  # the intent planner (topic templates)
+        para = re.search(r"\[(p\d+)\][^\[]*mastitis", prompt)
+        reply = {"topics": [{"intent": "prevention", "subject": "mastitis", "paragraphs": [para.group(1)]}]
+                 if para and "- prevention:" in prompt else []}
+    elif system.startswith("You write one fact") and "Subject: mastitis" in prompt:
+        unit = re.search(r"\[(p\d+\.s\d+)\][^\n]*mastitis", prompt).group(1)
+        reply = {"facts": [{"claim": "A dry shed floor prevents hoof problems and mastitis in dairy animals.", "first": unit, "last": unit}]}
+    elif system.startswith("You plan fact extraction"):
         reply = {"topics": [{"topic": "colostrum timing", "kind": "figure", "paragraphs": ["p1"]}] if "colostrum" in prompt else []}
     elif system.startswith("You write one fact"):
         reply = {"facts": [{"claim": "Calves should get colostrum within two hours of birth.", "first": "p1.s1", "last": "p1.s1"}]}
@@ -40,6 +48,9 @@ def _agents(messages, info):
         reply = {"reviews": [{"id": "f1", "verdict": "keep", "claim": "", "reason": ""}]}
     elif system.startswith("You review benchmark questions"):
         reply = {"reviews": []}
+    elif "TYPE: direct" in system and "DOCUMENT TYPE" in prompt:  # a template writer
+        reply = {"questions": [{"question": "How can dairy farmers prevent mastitis in their cows?", "fact_ids": ["f1"],
+                                "answer": "A dry floor prevents hoof problems and mastitis", "absent_term": ""}]}
     elif "TYPE: direct" in system and "whole library" not in prompt:
         reply = {"questions": [{"question": "How soon after birth should a calf be fed colostrum?", "fact_ids": ["f1"],
                                 "answer": "within two hours of birth", "absent_term": ""}]}
@@ -59,7 +70,8 @@ def test_bench_run_end_to_end(book):
     result = CliRunner().invoke(cli.app, ["run"])
     assert result.exit_code == 0, result.output
     assert all(ok for checks in all_checks().values() for _, ok, _ in checks)
-    (scored,) = [json.loads(line) for line in (config.DATA_DIR / "results.jsonl").read_text().splitlines()]
+    scored, topical = [json.loads(line) for line in (config.DATA_DIR / "results.jsonl").read_text().splitlines()]
+    assert topical["intent"] == "animal_care.prevention" and "template" not in scored
     assert scored["uid"] and scored["first_rank"] == 1  # the fake embedding finds the colostrum chunk first
     report = (config.DATA_DIR / "report.md").read_text()
     assert "| direct | 1 |" in report and "| book.pdf | 1 |" in report and (config.DATA_DIR / "bench.xlsx").exists()
@@ -68,6 +80,12 @@ def test_bench_run_end_to_end(book):
     assert manifest["test_set"] in report and manifest["pdfs"][0][0] == "book.pdf" and len(scored["ranked"]) >= 1
     assert stats["questions"]["kept"] == {"direct": 1} and stats["retrieval"]["by_type"][0]["n"] == 1
     assert {p.name for p in run.iterdir()} >= {"facts.jsonl", "questions.jsonl", "results.jsonl", "report.md"}
+
+    (row,) = [json.loads(line) for line in (config.DATA_DIR / "templates.jsonl").read_text().splitlines()]
+    assert row["templates"] == {"animal_care": ["symptoms", "cause_and_spread", "prevention", "vaccination_schedule", "treatment_first_aid"]}
+    assert [(f["fact_id"], f["intent"], f["subject"]) for f in row["facts"]] == [("book-01:tf01", "prevention", "mastitis")]
+    assert [(q["question_id"], q["intent"]) for q in row["questions"]] == [("book-01:t01", "prevention")]
+    assert "## Topic templates" in report and "| animal_care.prevention | 1 |" in report
 
     calls = len((config.DATA_DIR / "trace.jsonl").read_text().splitlines())
     assert CliRunner().invoke(cli.app, ["run"]).exit_code == 0  # a second run resumes: no agent call
