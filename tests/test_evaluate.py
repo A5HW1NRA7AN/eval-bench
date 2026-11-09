@@ -39,3 +39,15 @@ def test_scores():
     assert hit["all_facts@10"] == 1.0
     miss = score(["x", "y"], gold)
     assert miss["first_rank"] is None and miss["rr"] == 0.0 and miss["hit@10"] == 0.0 and miss["all_facts@10"] == 0.0
+
+
+def test_keyword_search_and_rank_fusion():
+    from bench.testbed import RRF_K, Keyword, fuse
+    chunks = [{"chunk_id": "a", "text": "Give the calf colostrum within two hours of birth."},
+              {"chunk_id": "b", "text": "Sheds should be cleaned every day and the floor kept dry."},
+              {"chunk_id": "c", "text": "Milk production was 247.87 million tonnes in 2024-25."}]
+    keyword = Keyword(chunks)
+    assert [cid for cid, _ in keyword.search("When should a calf get colostrum?", 3)] == ["a", "b"]  # b shares "should"
+    assert keyword.search("milk 247.87", 3)[0][0] == "c" and keyword.search("tractor", 3) == []
+    fused = fuse([("a", 0.9), ("b", 0.8)], [("b", 7.0), ("c", 3.0)], k=3)
+    assert [cid for cid, _ in fused] == ["b", "a", "c"] and fused[0][1] == 1 / (RRF_K + 2) + 1 / (RRF_K + 1)

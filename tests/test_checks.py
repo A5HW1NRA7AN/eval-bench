@@ -123,3 +123,8 @@ def test_a_garbled_or_unparseable_answer_is_asked_again_as_free_text(monkeypatch
     assert modes == ["native", "prompted"] and json.loads(llm.TRACE.read_text())["mode"] == "prompted"
     llm.call("tester", llm.agent(Out, "Write a claim."), "milk", "book-01")
     assert len(modes) == 2  # the clean answer was cached
+
+
+def test_a_csv_cell_never_runs_as_a_formula():
+    from bench.export import _safe
+    assert _safe("=HYPERLINK(1)") == "'=HYPERLINK(1)" and _safe("-0.50") == "'-0.50" and _safe("Milk") == "Milk" and _safe(None) == ""

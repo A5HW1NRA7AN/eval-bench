@@ -5,6 +5,8 @@ Sheets that need a stage not run yet are left out. Each sheet has a frozen heade
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from collections import Counter
 from pathlib import Path
@@ -15,14 +17,15 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from bench.checks import all_checks
-from bench.config import DATA_DIR
-from bench.evaluate import KS, RESULTS, summary, test_set_id
+from bench.config import DATA_DIR, BenchError
+from bench.evaluate import KS, RESULTS, by_method, summary, test_set_id
 from bench.facts import FACTS
 from bench.llm import TRACE
-from bench.pdf import PAGES, read_jsonl
+from bench.pdf import PAGES, read_jsonl, write_text
 from bench.questions import QUESTIONS
 from bench.segments import SEGMENTS
 from bench.templates import ROWS as TEMPLATE_ROWS
+from bench.templates import current_questions
 from bench.testbed import CHUNKS
 from bench.verify import reason_group
 
@@ -161,6 +164,8 @@ def run_export() -> Path:
     if answerable:
         pdf_of = {s["segment_id"]: s["file_name"] for s in segments}
         _sheet(book, "Metrics by type", summary(answerable, "type"))
+        if all("baselines" in r for r in answerable):
+            _sheet(book, "Metrics by method", by_method(answerable))
         _sheet(book, "Metrics by PDF", summary([{**r, "pdf": pdf_of.get(r["question_id"].rsplit(":", 1)[0], "several PDFs")}
                                                 for r in answerable], "pdf"))
     if templated:
@@ -177,3 +182,54 @@ def run_export() -> Path:
     book.save(WORKBOOK)
     print(f"wrote {WORKBOOK}: {', '.join(book.sheetnames)}")
     return WORKBOOK
+
+
+TESTSET_JSON, TESTSET_CSV = DATA_DIR / "testset.json", DATA_DIR / "testset.csv"
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # a spreadsheet would run such a cell as a formula
+
+
+def testset_rows() -> list[dict[str, Any]]:
+    """Every current question, general then template, with its answer and evidence (PDF, pages, quote, position)."""
+    pdf_of = {s["segment_id"]: s["file_name"] for s in _rows(SEGMENTS)}
+    out = []
+    for kind, questions in (("general", [q for r in _rows(QUESTIONS) for q in r["questions"]]), ("template", current_questions())):
+        for q in questions:
+            out.append({"uid": q["uid"], "question_id": q["question_id"], "set": kind, "type": q["type"],
+                        "template": q.get("template"), "intent": q.get("intent"), "subject": q.get("subject"),
+                        "question": q["question"], "answer": q.get("answer") or None, "absent_term": q.get("absent_term") or None,
+                        "answerable": bool(q["evidence"]),
+                        "evidence": [{"file_name": pdf_of.get(ev["segment_id"]), "segment_id": ev["segment_id"], "pages": ev["pages"],
+                                      "quote": ev["quote"], "start": ev["start"], "end": ev["end"]} for ev in q["evidence"]]})
+    return out
+
+
+def _safe(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(FORMULA_START) else text
+
+
+def run_testset() -> tuple[Path, Path]:
+    """The test set to hand to another team: data/testset.json (with the test-set ids) and data/testset.csv."""
+    rows = testset_rows()
+    if not rows:
+        raise BenchError("no verified questions: run `bench questions` first")
+    general, topical = [r for r in rows if r["set"] == "general"], [r for r in rows if r["set"] == "template"]
+    header = {"test_set": test_set_id(general), "template_test_set": test_set_id(topical) if topical else None,
+              "questions": len(general), "template_questions": len(topical),
+              "note": "Each answer is copied from its evidence quotes, which are verbatim PDF text; start and end are "
+                      "character positions in the section (segment) text. uid stays the same across runs."}
+    write_text(TESTSET_JSON, json.dumps({**header, "items": rows}, indent=1, ensure_ascii=False))
+    columns = ["uid", "question_id", "set", "type", "template", "intent", "subject", "question", "answer", "absent_term",
+               "answerable", "pdf", "pages", "evidence"]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    for r in rows:
+        flat = {**r, "pdf": "; ".join(sorted({e["file_name"] or "" for e in r["evidence"]})),
+                "pages": "; ".join(f"{e['pages'][0]}-{e['pages'][-1]}" for e in r["evidence"] if e["pages"]),
+                "evidence": "\n---\n".join(e["quote"] for e in r["evidence"])}
+        writer.writerow([_safe(flat[c]) for c in columns])
+    write_text(TESTSET_CSV, buffer.getvalue())
+    print(f"wrote {TESTSET_JSON.name} and {TESTSET_CSV.name}: {len(general)} general and {len(topical)} template questions "
+          f"(test set {header['test_set']})")
+    return TESTSET_JSON, TESTSET_CSV

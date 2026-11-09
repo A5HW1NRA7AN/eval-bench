@@ -1,14 +1,17 @@
 """The local test bed: every segment chunked, embedded with Ollama and searched in Qdrant.
 
 Chunks partition each segment's text exactly (no overlap, nothing dropped), so a fact's verified
-position in the segment tells us which chunks hold it.
+position in the segment tells us which chunks hold it. Two baselines search the same chunks: keyword
+search (BM25, in pure Python) and a hybrid that fuses it with the embedding search (reciprocal rank fusion).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import uuid
+from collections import Counter, defaultdict
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,6 +26,9 @@ CHUNKS = DATA_DIR / "chunks.jsonl"
 COLLECTION = "bench_docs"
 CHUNK_CHARS = 1200
 BATCH = 32
+TOKEN = re.compile(r"[a-z0-9]+(?:[.,][0-9]+)*")  # words and numbers ("247.87", "1,500")
+BM25_K1, BM25_B = 1.2, 0.75  # the usual BM25 settings
+RRF_K = 60  # reciprocal rank fusion: score = sum of 1 / (RRF_K + rank) over the rankings (Cormack et al., 2009)
 # Prefer a paragraph break, then a sentence end, then any space, in the second half of the window.
 BOUNDARIES = (re.compile(r"\n\s*\n"), re.compile(r"[.!?]\s+"), re.compile(r"\s+"))
 
@@ -93,6 +99,40 @@ def search(client: QdrantClient, vector: list[float], k: int) -> list[tuple[str,
     hits = client.query_points(COLLECTION, query=vector, limit=k, with_payload=True,
                                search_params=models.SearchParams(exact=True)).points
     return sorted(((h.payload["chunk_id"], h.score) for h in hits), key=lambda hit: (-hit[1], hit[0]))
+
+
+class Keyword:
+    """BM25 keyword search over the test-bed chunks: the baseline the embedding search is compared with."""
+
+    def __init__(self, chunks: list[dict[str, Any]]):
+        self.ids = [c["chunk_id"] for c in chunks]
+        self.docs = [Counter(TOKEN.findall(c["text"].lower())) for c in chunks]
+        self.lengths = [sum(d.values()) for d in self.docs]
+        self.mean = sum(self.lengths) / max(len(self.lengths), 1)
+        self.postings: dict[str, list[int]] = defaultdict(list)
+        for i, doc in enumerate(self.docs):
+            for term in doc:
+                self.postings[term].append(i)
+        n = len(self.docs)
+        self.idf = {t: math.log(1 + (n - len(ids) + 0.5) / (len(ids) + 0.5)) for t, ids in self.postings.items()}
+
+    def search(self, query: str, k: int) -> list[tuple[str, float]]:
+        """(chunk_id, score) of the k best chunks, best first, ties broken by chunk_id."""
+        scores: dict[int, float] = defaultdict(float)
+        for term in set(TOKEN.findall(query.lower())):
+            for i in self.postings.get(term, []):
+                tf = self.docs[i][term]
+                scores[i] += self.idf[term] * tf * (BM25_K1 + 1) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * self.lengths[i] / self.mean))
+        return sorted(((self.ids[i], s) for i, s in scores.items()), key=lambda hit: (-hit[1], hit[0]))[:k]
+
+
+def fuse(*rankings: list[tuple[str, float]], k: int) -> list[tuple[str, float]]:
+    """Reciprocal rank fusion of several rankings: the hybrid baseline. Only ranks count, not scores."""
+    scores: dict[str, float] = defaultdict(float)
+    for ranking in rankings:
+        for rank, (cid, _) in enumerate(ranking, start=1):
+            scores[cid] += 1 / (RRF_K + rank)
+    return sorted(scores.items(), key=lambda hit: (-hit[1], hit[0]))[:k]
 
 
 def load_chunks() -> list[dict[str, Any]]:

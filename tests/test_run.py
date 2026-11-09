@@ -86,6 +86,12 @@ def test_bench_run_end_to_end(book):
     assert [(f["fact_id"], f["intent"], f["subject"]) for f in row["facts"]] == [("book-01:tf01", "prevention", "mastitis")]
     assert [(q["question_id"], q["intent"]) for q in row["questions"]] == [("book-01:t01", "prevention")]
     assert "## Topic templates" in report and "| animal_care.prevention | 1 |" in report
+    assert "## Baselines" in report and "| keyword search (BM25) | 1 |" in report
+    assert CliRunner().invoke(cli.app, ["testset"]).exit_code == 0
+    testset = json.loads((config.DATA_DIR / "testset.json").read_text())
+    assert testset["test_set"] in report and [i["set"] for i in testset["items"]] == ["general", "template"]
+    assert testset["items"][0]["evidence"][0]["file_name"] == "book.pdf"
+    assert (config.DATA_DIR / "testset.csv").read_text().startswith("uid,question_id,set,type")
 
     calls = len((config.DATA_DIR / "trace.jsonl").read_text().splitlines())
     assert CliRunner().invoke(cli.app, ["run"]).exit_code == 0  # a second run resumes: no agent call

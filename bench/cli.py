@@ -152,6 +152,15 @@ def export() -> None:
 
 
 @app.command()
+@_command(writes=True)
+def testset() -> None:
+    """Write the test set to hand to another team -> data/testset.json and data/testset.csv."""
+    from bench.export import run_testset
+
+    run_testset()
+
+
+@app.command()
 @_command()
 def check(stage: str = typer.Argument(None, help="segment, facts, questions, templates, index or evaluate (all if left out)")) -> None:
     """Check every stage's saved output without the LLM: is it complete, verbatim and in step?"""

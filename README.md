@@ -85,6 +85,7 @@ uv run bench evaluate
 ```
 uv run bench check            # checks every stage's saved output without the LLM (or: bench check facts)
 uv run bench export           # every stage, the scores and the agent calls in one workbook: data/bench.xlsx
+uv run bench testset          # the test set to hand over: data/testset.json and data/testset.csv
 uv run bench serve            # a read-only JSON API over every stage's output on http://127.0.0.1:8000
 uv run bench --verbose facts  # any stage, also printing each agent's prompt and answer
 ```
@@ -136,7 +137,8 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 | `facts.jsonl` | per segment: verified facts (with position and pages) and rejected ones (with reasons) |
 | `questions.jsonl` | per segment: verified questions, each with its evidence (quotes and positions), and rejected ones |
 | `chunks.jsonl` | the test-bed chunks stored in Qdrant |
-| `results.jsonl`, `report.md` | per-question results (the top 100 chunks) and the scored report, per type and per document |
+| `results.jsonl`, `report.md` | per-question results (the top 100 chunks) and the scored report: per type, per document, and against two baselines (BM25 keyword search, and a hybrid of BM25 and embeddings by reciprocal rank fusion) |
+| `testset.json`, `testset.csv` | every current question with its answer and evidence (PDF, pages, verbatim quote, position) and stable ids; CSV cells are formula-safe |
 | `runs/<run>/` | each `bench evaluate`: the facts, questions, results and report it scored, `manifest.json` (code, models, test set, PDFs) and `stats.json` (audit rejections by rule, AI flags, scores) |
 | `cache/` | every LLM answer, keyed by model, settings, instructions, schema and prompt |
 | `topics.json`, `coverage.md` | your template overrides and switches; the template coverage report |

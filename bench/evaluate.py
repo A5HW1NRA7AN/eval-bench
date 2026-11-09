@@ -27,11 +27,22 @@ from bench.pdf import PAGES, read_jsonl, write_jsonl, write_text
 from bench.questions import QUESTIONS, QUESTIONS_VERSION
 from bench.templates import ROWS as TEMPLATE_ROWS
 from bench.templates import current_questions
-from bench.testbed import CHUNK_CHARS, COLLECTION, embed, load_chunks, qdrant, search
+from bench.testbed import (
+    CHUNK_CHARS,
+    COLLECTION,
+    Keyword,
+    embed,
+    fuse,
+    load_chunks,
+    qdrant,
+    search,
+)
 from bench.verify import find, reason_group, uid
 
 KS = (1, 3, 5, 10)
 RANKED = 100  # chunks kept per question, so later metrics need no new search
+METHODS = {"dense": "embedding search (bge-m3, the test bed)", "bm25": "keyword search (BM25)",
+           "hybrid": "hybrid (BM25 + embeddings, reciprocal rank fusion)"}
 REPORT = DATA_DIR / "report.md"
 RESULTS = DATA_DIR / "results.jsonl"
 RUNS = DATA_DIR / "runs"
@@ -99,6 +110,15 @@ def test_set_id(questions: list[dict[str, Any]]) -> str:
     return uid(sorted(q.get("uid", "") for q in questions))
 
 
+def by_method(answerable: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One summary row per search method over the same questions: the test bed, then the baselines."""
+    rows = []
+    for method, name in METHODS.items():
+        scored = answerable if method == "dense" else [r["baselines"][method] for r in answerable]
+        rows.append({"method": name, "n": len(scored), **{m: sum(r[m] for r in scored) / len(scored) for m in METRICS}})
+    return with_intervals(rows)
+
+
 def _git() -> str:
     """The commit the code was at, marked when files were changed since (read-only git)."""
     try:
@@ -130,7 +150,8 @@ def stats(fact_rows: list[dict[str, Any]], question_rows: list[dict[str, Any]], 
         "questions": {"kept": counts(question_rows, "questions", "type"), "rejected": counts(question_rows, "rejected", "type"),
                       "ai_flags": flagged(question_rows, "questions")},
         "retrieval": {"by_type": with_intervals(summary(answerable, "type")),
-                      "by_document": with_intervals(summary(answerable, "document"))},
+                      "by_document": with_intervals(summary(answerable, "document")),
+                      "by_method": by_method(answerable)},
     }
 
 
@@ -161,7 +182,8 @@ def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]
                                           "rejected": dict(Counter(reason_group(x["reason"]) for r in template_rows for x in r["rejected_facts"]))},
                                 "questions": {"kept": len(topical),
                                               "rejected": dict(Counter(reason_group(x["reason"]) for r in template_rows for x in r["rejected"]))},
-                                "retrieval": {"by_intent": with_intervals(summary(templated, "intent"))}}
+                                "retrieval": {"by_intent": with_intervals(summary(templated, "intent")),
+                                              "by_method": by_method(templated)}}
     write_text(folder / "stats.json", json.dumps(numbers, indent=1, ensure_ascii=False))
     return folder
 
@@ -206,13 +228,17 @@ def run_evaluate() -> None:
     for q in questions:
         check_evidence(q, texts)
 
-    client, vectors = qdrant(), embed([q["question"] for q in questions])
+    client, vectors, keyword = qdrant(), embed([q["question"] for q in questions]), Keyword(chunks)
     results = []
     for q, vector in zip(questions, vectors):
         hits = search(client, vector, RANKED)
         found = {"ranked": hits, "top_score": hits[0][1] if hits else 0.0}
         if q["evidence"]:
-            found |= score([cid for cid, _ in hits], gold_chunks(q, chunks_by_segment))
+            gold = gold_chunks(q, chunks_by_segment)
+            words = keyword.search(q["question"], RANKED)
+            found |= score([cid for cid, _ in hits], gold)
+            found["baselines"] = {"bm25": score([cid for cid, _ in words], gold),
+                                  "hybrid": score([cid for cid, _ in fuse(hits, words, k=RANKED)], gold)}
         document = by_segment_file.get(q["evidence"][0]["segment_id"], "?") if q["evidence"] else "none"
         results.append({"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "document": document,
                         **({"template": q["template"], "intent": f"{q['template']}.{q['intent']}"} if "template" in q else {}),
@@ -234,6 +260,10 @@ def run_evaluate() -> None:
         *_table(with_intervals(summary(answerable, "type"))), "",
         "By the document holding the evidence:", "",
         *_table(with_intervals(summary(answerable, "document"))), "",
+        "## Baselines", "",
+        "The same questions searched three ways over the same chunks: the embedding search above, keyword search "
+        "(BM25) and a hybrid of the two (reciprocal rank fusion). Gold chunks and scoring are the same for all three.", "",
+        *_table(by_method(answerable)), "",
     ]
     if empty := sorted(set(question_types()) - {q["type"] for q in questions}):
         lines += [f"Switched-on types with no kept question: {', '.join(empty)}.", ""]
@@ -250,7 +280,8 @@ def run_evaluate() -> None:
         lines += ["## Topic templates", "",
                   f"{len(templated)} questions aimed at the intents of each section's templates (test set "
                   f"`{test_set_id(topical)}`), written and audited apart from the general questions above. Per intent:", "",
-                  *_table(with_intervals(summary(templated, "intent"))), ""]
+                  *_table(with_intervals(summary(templated, "intent"))), "",
+                  "The template questions searched three ways:", "", *_table(by_method(templated)), ""]
     misses = [r for r in answerable if r["first_rank"] is None or r["first_rank"] > 10]
     lines += [f"## Misses: {len(misses)} of {len(answerable)} questions had no answer chunk in the top 10", ""]
     for r in misses:
