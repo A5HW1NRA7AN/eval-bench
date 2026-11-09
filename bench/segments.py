@@ -210,19 +210,23 @@ def _segment(seg_id: str, file_name: str, doc_id: str, title: str, pages: list[d
 
 
 def _split(seg_id: str, segment_pages: list[dict[str, Any]], headings: list[dict[str, Any]], make: Any) -> list[dict[str, Any]]:
-    """A top-level segment longer than SPLIT_CHARS, cut at the pages where its level-2 TOC entries start;
-    pieces shorter than MIN_PIECE are merged into the one before. Each piece keeps the parent heading, so its
-    heading path still names the chapter."""
+    """A top-level segment longer than SPLIT_CHARS, cut at the pages where its level-2 TOC entries start.
+    Pieces are grouped in order until a group holds MIN_PIECE characters (a short last group joins the one
+    before), so many short sections, such as one table per page, don't collapse back into one. Each piece keeps
+    the parent heading, so its heading path still names the chapter."""
     top, first = headings[0], segment_pages[0]["page"]
     cuts = sorted({h["page"] for h in headings[1:] if h["level"] == top["level"] + 1 and h["page"] > first})
     bounds = [first, *cuts, segment_pages[-1]["page"] + 1]
     pieces = [[p for p in segment_pages if a <= p["page"] < b] for a, b in zip(bounds, bounds[1:])]
+    size = lambda group: sum(len(p["text"]) for p in group)
     merged: list[list[dict[str, Any]]] = []
     for piece in pieces:
-        if merged and sum(len(p["text"]) for p in piece) < MIN_PIECE:
+        if merged and size(merged[-1]) < MIN_PIECE:
             merged[-1] = merged[-1] + piece
         else:
             merged.append(piece)
+    if len(merged) > 1 and size(merged[-1]) < MIN_PIECE:
+        merged[-2:] = [merged[-2] + merged[-1]]
     if len(merged) < 2:
         return [make(seg_id, top["title"], segment_pages, headings)]
     out = []

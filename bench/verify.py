@@ -129,9 +129,14 @@ def numbers(text: str) -> set[str]:
             | {WORD_NUMBERS[w] for w in re.findall(r"[a-z]+", text.lower()) if w in WORD_NUMBERS})
 
 
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # a garbled model answer ('5\x00C' for '5°C'); text from the PDFs has none
+
+
 def claim_problem(claim: str, quote: str, segment: dict[str, Any]) -> str | None:
     """Why the claim says more than its quote supports, or None. Values must be in the quote; dates,
     years and acronyms are qualifiers, so they must be somewhere in the section."""
+    if CONTROL.search(claim):
+        return "claim has a control character (a garbled model answer)"
     if PRONOUN_START.match(claim):
         return "claim starts with a pronoun"
     if extra := sorted({n.replace(",", "") for n in DIGITS.findall(DATE.sub(" ", claim))} - numbers(quote)):
@@ -205,6 +210,8 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
                      corpus: str | None = None) -> str | None:
     """Why a question fails the audit, or None if it passes: the general rules, then its type's rules
     (question_types.toml). `corpus` is the whole library's text, for the absent_term rule."""
+    if any(CONTROL.search(q.get(k, "")) for k in ("question", "answer", "absent_term")):
+        return "has a control character (a garbled model answer)"
     linked = [facts.get(i) for i in q["fact_ids"]]
     if not linked or None in linked:
         return "refers to a fact that isn't verified"

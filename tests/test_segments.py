@@ -153,7 +153,7 @@ def test_page_at_counts_a_separator_with_the_page_before():
     assert [page_at(seg, pos) for pos in (0, 9, 11, 12, 19)] == [3, 3, 3, 4, 4]
 
 
-def test_a_long_chapter_is_split_at_its_sections_and_small_pieces_merge(monkeypatch):
+def test_a_long_chapter_is_split_at_its_sections_and_short_ones_are_grouped(monkeypatch):
     pages = _pages(headings={9: "Breeds of Cattle", 11: "Exotic breeds", 12: "Crossbreds", 16: "Buffaloes", 22: "Housing"})
     pages[2]["raw_text"] = "Contents\n" + "\n".join(f"Entry {i} ........ {i}" for i in range(10))
     toc = [TocEntry(number="1", title="Breeds of Cattle", printed_page=1, level=1),
@@ -166,7 +166,17 @@ def test_a_long_chapter_is_split_at_its_sections_and_small_pieces_merge(monkeypa
     monkeypatch.setattr(segments, "MIN_PIECE", 300)  # one page holds ~220 characters
     report = {}
     found = {s["segment_id"]: (s["title"], s["pages"]) for s in segment_pdf(pages, report) if s["title"].startswith("1 ")}
-    assert found == {"book-01-1": ("1 Breeds of Cattle", [9, 11]),  # the one-page "Exotic breeds" merges into it
-                     "book-01-2": ("1 Breeds of Cattle > 1.2 Crossbreds", [12, 15]),
+    assert found == {"book-01-1": ("1 Breeds of Cattle", [9, 10]),
+                     "book-01-2": ("1 Breeds of Cattle > 1.1 Exotic breeds", [11, 15]),  # one short page takes the next section
                      "book-01-3": ("1 Breeds of Cattle > 1.3 Buffaloes", [16, 21])}
     assert report["segmented_by"] == "TOC" and report["agreement"] == 1.0 and report["placed"] == 5
+
+
+def test_many_short_sections_do_not_collapse_back_into_one(monkeypatch):
+    monkeypatch.setattr(segments, "MIN_PIECE", 500)
+    pages = _pages()[8:20]  # 12 pages of ~220 characters, a section on each
+    headings = [{"title": "5 Tables", "level": 1, "page": 9}] + [{"title": f"Table {n}", "level": 2, "page": n} for n in range(10, 21)]
+    make = lambda sid, title, piece, heads: {"segment_id": sid, "pages": [piece[0]["page"], piece[-1]["page"]],
+                                             "text": "".join(p["text"] for p in piece)}
+    pieces = segments._split("book-05", pages, headings, make)
+    assert [p["pages"] for p in pieces] == [[9, 11], [12, 14], [15, 17], [18, 20]]

@@ -99,3 +99,27 @@ def test_agent_calls_are_traced_and_the_workbook_has_every_sheet(tmp_path, monke
     assert book.sheetnames == ["Overview", "Segments", "Facts", "Checks", "Agent calls"]  # no questions or results yet
     row = {head.value: cell.value for head, cell in zip(book["Facts"][1], book["Facts"][2])}
     assert row["fact_id"] == "book-01:f01" and row["claim"] == "Calves need colostrum early."
+
+
+def test_a_garbled_or_unparseable_answer_is_asked_again_as_free_text(monkeypatch):
+    from pydantic import BaseModel
+    from pydantic_ai import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from bench import llm
+
+    class Out(BaseModel):
+        claim: str
+
+    modes = []
+
+    def endpoint(messages, info):  # guided decoding garbles '°' (native mode); free text gets it right
+        modes.append(info.model_request_parameters.output_mode)
+        native = modes[-1] == "native"
+        return ModelResponse(parts=[TextPart(json.dumps({"claim": "Cool milk to 5\x00C." if native else "Cool milk to 5°C."}))])
+
+    monkeypatch.setattr(llm, "model", lambda: FunctionModel(endpoint))
+    assert llm.call("tester", llm.agent(Out, "Write a claim."), "milk", "book-01").claim == "Cool milk to 5°C."
+    assert modes == ["native", "prompted"] and json.loads(llm.TRACE.read_text())["mode"] == "prompted"
+    llm.call("tester", llm.agent(Out, "Write a claim."), "milk", "book-01")
+    assert len(modes) == 2  # the clean answer was cached

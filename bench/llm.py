@@ -10,12 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, NativeOutput
+from pydantic_ai import Agent, NativeOutput, PromptedOutput
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -39,7 +41,11 @@ PROFILE = OpenAIModelProfile(
     native_output_requires_schema_in_instructions=True,
     openai_chat_supports_multiple_system_messages=False,
     openai_chat_supports_max_completion_tokens=False,
+    supports_json_object_output=False,  # the fallback below must be free text: JSON mode is guided decoding too
 )
+# The Gemma endpoint's guided decoding garbles non-ASCII it writes as \uXXXX escapes ('5\x00C' for '5°C', or
+# '\u000b' until the token limit for 'µg'). Such an answer is asked again as free text that holds the JSON.
+GARBLED = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")  # keep CLI output to our own lines
 
 
@@ -82,6 +88,12 @@ def _summary(output: BaseModel) -> str:
     return ", ".join(f"{len(v)} {k}" for k, v in lists.items()) or ", ".join(type(output).model_fields)
 
 
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        value = list(value.values())
+    return [t for v in value for t in _strings(v)] if isinstance(value, list) else [value] if isinstance(value, str) else []
+
+
 def _trace(record: dict[str, Any]) -> None:
     TRACE.parent.mkdir(parents=True, exist_ok=True)
     with TRACE.open("a") as f:
@@ -100,7 +112,9 @@ def call(role: str, agent: Agent[Any, Any], prompt: str, label: str, **kwargs: A
         try:
             hit = json.loads(path.read_text())
             output = agent.bench_spec[0].model_validate(hit["output"])  # type: ignore[attr-defined]
-        except (ValueError, KeyError):  # an unreadable entry is asked again
+            if any(GARBLED.search(text) for text in _strings(hit["output"])):
+                raise ValueError("garbled")
+        except (ValueError, KeyError):  # an unreadable or garbled entry is asked again
             pass
         else:
             console.print(f"  [cyan]{role}[/] ▸ {escape(label)} → {_summary(output)} [dim](cached)[/]")
@@ -109,7 +123,15 @@ def call(role: str, agent: Agent[Any, Any], prompt: str, label: str, **kwargs: A
             return output
     try:
         with console.status(f"[cyan]{role}[/] ▸ {escape(label)} …"):
-            result = agent.run_sync(prompt, **kwargs)
+            try:
+                result, mode = agent.run_sync(prompt, **kwargs), "native"
+                garbled = any(GARBLED.search(text) for text in _strings(result.output.model_dump()))
+            except UnexpectedModelBehavior:
+                garbled = True
+            if garbled:
+                output, instructions = agent.bench_spec  # type: ignore[attr-defined]
+                fallback = Agent(agent.model, output_type=PromptedOutput(output), instructions=instructions)
+                result, mode = fallback.run_sync(prompt, **kwargs), "prompted"
     except Exception as exc:
         _trace({**base, "seconds": round(time.monotonic() - started, 2), "prompt": prompt,
                 "error": f"{type(exc).__name__}: {exc}"})
@@ -123,7 +145,7 @@ def call(role: str, agent: Agent[Any, Any], prompt: str, label: str, **kwargs: A
         console.print(Panel(prompt, title=f"{role} prompt", border_style="dim"))
         console.print(Panel(json.dumps(output, indent=1, ensure_ascii=False), title=f"{role} output", border_style="cyan"))
     write_text(path, json.dumps({"served_model": response.model_name, "output": output}, ensure_ascii=False))
-    _trace({**base, "served_model": response.model_name, "finish_reason": response.finish_reason,
+    _trace({**base, "mode": mode, "served_model": response.model_name, "finish_reason": response.finish_reason,
             "requests": usage.requests, "seconds": round(seconds, 2), "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens, "prompt": prompt, "output": output})
     return result.output

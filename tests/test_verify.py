@@ -192,3 +192,11 @@ def test_the_fact_budget_grows_with_length_between_a_floor_and_a_cap():
     budget = lambda chars: facts.fact_budget({"text": "x" * chars})
     assert (budget(100), budget(30_000), budget(10**6)) == (facts.MIN_FACTS, round(30_000 / facts.FACT_CHARS), facts.MAX_FACTS)
     assert facts.fact_budget({"text": "x" * 100}, {"max_facts": 7, "max_facts_from": "length"}) == facts.MIN_FACTS  # recomputed
+
+
+def test_garbled_model_text_never_passes_the_audit():
+    segment = {"text": "Cool milk to 5°C within one hour.", "title": "Milk", "file_name": "book.pdf", "headings": []}
+    assert claim_problem("Cool milk to 5\x00C within one hour.", segment["text"], segment).startswith("claim has a control")
+    fact = {"fact_id": "s:f01", "quote": segment["text"]}
+    q = {"question": "How cold should milk be kept?\x19", "answer": "5°C", "fact_ids": ["s:f01"]}
+    assert question_problem(q, {"s:f01": fact}, {}).startswith("has a control character")
