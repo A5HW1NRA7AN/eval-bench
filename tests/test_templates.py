@@ -10,7 +10,6 @@ from bench.templates import (
     assigned,
     coverage,
     fact_intents,
-    plan_and_extract,
     styles,
     subject_names,
     template_fact_problem,
@@ -125,12 +124,16 @@ SCHEME = _segment("dairy-01", "Schemes", ("The centrally sponsored scheme gives 
 GENERAL = _segment("dairy-05", "Housing", "A shed should face east and have a sloping floor so that it stays dry. " * 10)
 
 
-def test_sections_are_categorised_by_code_and_you_can_override():
+def test_the_orchestrator_categorises_the_rules_are_its_fallback_and_you_can_override():
     assert assigned(DISEASE, REPO, NO_TOPICS) == (["animal_care"], "rules")
     assert assigned(STATS, REPO, NO_TOPICS) == (["statistical_report"], "rules")
     assert assigned(SCHEME, REPO, NO_TOPICS) == (["govt_scheme"], "rules")
     assert assigned(GENERAL, REPO, NO_TOPICS) == ([], "rules")
-    assert assigned(GENERAL, REPO, {"switches": {}, "sections": {"dairy-05": ["animal_care"]}}) == (["animal_care"], "you")
+    saved = {"dairy-05": {"templates": ["govt_scheme"], "by": "orchestrator"}}  # the decision saved on the PDF's row
+    assert assigned(GENERAL, REPO, NO_TOPICS, saved) == (["govt_scheme"], "orchestrator")
+    assert assigned(GENERAL, REPO, {"switches": {}, "sections": {"dairy-05": ["animal_care"]}}, saved) == (["animal_care"], "you")
+    assert active(DISEASE, REPO, {"switches": {"animal_care.symptoms": False}, "sections": {}}) == {
+        "animal_care": ["cause_and_spread", "prevention", "vaccination_schedule", "treatment_first_aid"]}
 
 
 def test_coverage_statuses():
@@ -189,22 +192,6 @@ def test_a_table_row_takes_its_unit_from_the_header():
                  header_start=text.index("Year |"), template="statistical_report", intent="value_lookup", subject="milk production")
     seg = {**STATS, "text": text, "headings": [], "page_spans": [{"page": 1, "start": 0, "end": len(text)}], "pages": [1, 1]}
     assert template_fact_problem(fact, seg, REPO) is None
-
-
-def test_only_parts_that_state_a_switched_on_intent_cost_a_call(monkeypatch):
-    from pydantic_ai import ModelResponse, TextPart
-    from pydantic_ai.models.function import FunctionModel
-
-    from bench import llm
-    calls = []
-    monkeypatch.setattr(llm, "model", lambda: FunctionModel(lambda m, i: calls.append(1) or ModelResponse(parts=[TextPart('{"topics": []}')])))
-    seg = {**GENERAL, "headings": [], "pages": [1, 1], "page_spans": [{"page": 1, "start": 0, "end": len(GENERAL["text"])}]}
-    assert plan_and_extract(seg, "animal_care", REPO["animal_care"], list(REPO["animal_care"].intents), None) == [] and not calls
-    seg = {**seg, "text": DISEASE["text"], "page_spans": [{"page": 1, "start": 0, "end": len(DISEASE["text"])}]}
-    plan_and_extract(seg, "animal_care", REPO["animal_care"], ["prevention"], None)
-    assert len(calls) == 1
-    assert active(DISEASE, REPO, {"switches": {"animal_care.symptoms": False}, "sections": {}}) == {
-        "animal_care": ["cause_and_spread", "prevention", "vaccination_schedule", "treatment_first_aid"]}
 
 
 def test_a_template_question_names_its_subject_and_is_not_a_general_question():

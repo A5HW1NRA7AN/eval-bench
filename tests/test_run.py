@@ -6,6 +6,7 @@ import re
 
 import pymupdf
 import pytest
+from openpyxl import load_workbook
 from pydantic_ai import ModelResponse, TextPart
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.function import FunctionModel
@@ -33,10 +34,14 @@ def _pdf(path):
 def _agents(messages, info):
     """Every agent's reply, told apart by its instructions."""
     system, prompt = messages[-1].instructions, messages[-1].parts[-1].content
-    if system.startswith("You plan a search benchmark for one kind"):  # the intent planner (topic templates)
+    if system.startswith("You categorise the sections"):  # the orchestrator: which templates each section answers
+        reply = {"sections": [{"section": "s1", "templates": ["animal_care"]}]}
+    elif system.startswith("You read one part"):  # a reader: what the part states for each intent
         para = re.search(r"\[(p\d+)\][^\[]*mastitis", prompt)
-        reply = {"topics": [{"intent": "prevention", "subject": "mastitis", "paragraphs": [para.group(1)]}]
-                 if para and "- prevention:" in prompt else []}
+        reply = {"entries": [{"intent": "prevention", "subject": "mastitis", "paragraphs": [para.group(1)],
+                              "detail": "a dry floor prevents mastitis"}] if para and "- prevention:" in prompt else []}
+    elif system.startswith("You plan the template questions"):  # the orchestrator's plan: every entry, one subject
+        reply = {"subjects": [{"name": "mastitis", "entries": re.findall(r"^(e\d+) ", prompt, re.MULTILINE)}], "briefs": []}
     elif system.startswith("You write one fact") and "Subject: mastitis" in prompt:
         unit = re.search(r"\[(p\d+\.s\d+)\][^\n]*mastitis", prompt).group(1)
         reply = {"facts": [{"claim": "A dry shed floor prevents hoof problems and mastitis in dairy animals.", "first": unit, "last": unit}]}
@@ -81,10 +86,15 @@ def test_bench_run_end_to_end(book):
     assert stats["questions"]["kept"] == {"direct": 1} and stats["retrieval"]["by_type"][0]["n"] == 1
     assert {p.name for p in run.iterdir()} >= {"facts.jsonl", "questions.jsonl", "results.jsonl", "report.md"}
 
-    (row,) = [json.loads(line) for line in (config.DATA_DIR / "templates.jsonl").read_text().splitlines()]
-    assert row["templates"] == {"animal_care": ["symptoms", "cause_and_spread", "prevention", "vaccination_schedule", "treatment_first_aid"]}
-    assert [(f["fact_id"], f["intent"], f["subject"]) for f in row["facts"]] == [("book-01:tf01", "prevention", "mastitis")]
+    (row,) = [json.loads(line) for line in (config.DATA_DIR / "templates.jsonl").read_text().splitlines()]  # one row per PDF
+    assert row["sections"] == {"book-01": {"templates": ["animal_care"], "by": "orchestrator"}}
+    assert [(e["id"], e["pick"]["by"], e["pick"]["subject"]) for e in row["entries"]] == [("e1", "orchestrator", "mastitis")]
+    assert [(f["fact_id"], f["intent"], f["subject"], f["entry"]) for f in row["facts"]] == [("book-01:tf01", "prevention", "mastitis", "e1")]
     assert [(q["question_id"], q["intent"]) for q in row["questions"]] == [("book-01:t01", "prevention")]
+    assert row["failed_calls"] == [] and row["calls"]["orchestrator plan"] == 1
+    generation = stats["templates"]["generation"]
+    assert generation["questions"]["kept"] == 1 and generation["picks"] == {"orchestrator": 1} and generation["cells"] == 1
+    assert "Plan" in load_workbook(config.DATA_DIR / "bench.xlsx").sheetnames
     assert "## Topic templates" in report and "| animal_care.prevention | 1 |" in report
     assert "## Baselines" in report and "| keyword search (BM25) | 1 |" in report
     assert CliRunner().invoke(cli.app, ["testset"]).exit_code == 0

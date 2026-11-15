@@ -24,8 +24,7 @@ from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl, write_text
 from bench.questions import QUESTIONS
 from bench.segments import SEGMENTS
-from bench.templates import ROWS as TEMPLATE_ROWS
-from bench.templates import current_questions
+from bench.templates import current_questions, pdf_rows
 from bench.testbed import CHUNKS
 from bench.verify import reason_group
 
@@ -77,7 +76,7 @@ def flags(items: Any) -> int:
 
 
 def run_export() -> Path:
-    segments, facts, questions, topical = _rows(SEGMENTS), _rows(FACTS), _rows(QUESTIONS), _rows(TEMPLATE_ROWS)
+    segments, facts, questions, topical = _rows(SEGMENTS), _rows(FACTS), _rows(QUESTIONS), pdf_rows()
     results, trace = _rows(RESULTS), _rows(TRACE)
     chunks = {c["chunk_id"]: c for c in _rows(CHUNKS)}
     facts_by, questions_by = {r["segment_id"]: r for r in facts}, {r["segment_id"]: r for r in questions}
@@ -138,19 +137,31 @@ def run_export() -> Path:
                                          "question": q["question"], "answer": q.get("answer"), "fact_ids": ", ".join(q["fact_ids"])}
                                         for r in questions for q in r["rejected"]])
     if topical:
+        _sheet(book, "Plan", [  # every entry a reader gave, and what became of it
+            {"pdf": r["file_name"], "entry": e["id"], "section": e["segment_id"], "template": e["template"], "intent": e["intent"],
+             "reader_subject": e["subject"], "detail": e["detail"], "paragraphs": ", ".join(e["paragraphs"]),
+             "dropped_by_code": e.get("dropped"), "picked_by": (e.get("pick") or {}).get("by"),
+             "subject": (e.get("pick") or {}).get("subject"), "brief": (e.get("pick") or {}).get("brief"),
+             "fact": next((f["fact_id"] for f in r["facts"] if f["entry"] == e["id"]), None)
+             or next((f["reason"] for f in r["rejected_facts"] if f.get("entry") == e["id"]), None),
+             "questions": ", ".join(q["question_id"] for q in r["questions"]
+                                    for f in r["facts"] if f["entry"] == e["id"] and f["fact_id"] in q["fact_ids"])}
+            for r in topical for e in r["entries"]])
         _sheet(book, "Template facts", [{"fact_id": f["fact_id"], "template": f["template"], "intent": f["intent"],
-                                         "subject": f["subject"], "claim": f["claim"], "header": f.get("header"), "quote": f["quote"],
-                                         "pages": f"{f['pages'][0]}-{f['pages'][-1]}", "ai_review": f.get("review", {}).get("verdict"),
-                                         "ai_review_reason": f.get("review", {}).get("reason")} for r in topical for f in r["facts"]])
+                                         "subject": f["subject"], "entry": f.get("entry"), "brief": f.get("brief"), "claim": f["claim"],
+                                         "header": f.get("header"), "quote": f["quote"], "pages": f"{f['pages'][0]}-{f['pages'][-1]}",
+                                         "ai_review": f.get("review", {}).get("verdict"), "ai_review_reason": f.get("review", {}).get("reason")}
+                                        for r in topical for f in r["facts"]])
         _sheet(book, "Template questions", [
             {"question_id": q["question_id"], "uid": q["uid"], "template": q["template"], "intent": q["intent"], "subject": q["subject"],
-             "type": q["type"], "question": q["question"], "answer": q.get("answer"), "ai_review": q.get("review", {}).get("verdict"),
+             "type": q["type"], "question": q["question"], "answer": q.get("answer"), "repaired_from": q.get("original"),
+             "repair_of": q.get("repair_of"), "ai_review": q.get("review", {}).get("verdict"),
              "ai_review_reason": q.get("review", {}).get("reason"), "evidence": "\n---\n".join(ev["quote"] for ev in q["evidence"]),
              "first_rank": scored.get(q["uid"], {}).get("first_rank"), **{f"hit@{k}": scored.get(q["uid"], {}).get(f"hit@{k}") for k in KS}}
             for r in topical for q in r["questions"]], bad=lambda row: missed(scored.get(row["uid"], {})))
-        _sheet(book, "Rejected template items", [{"segment_id": r["segment_id"], "stage": stage, "reason": x["reason"],
+        _sheet(book, "Rejected template items", [{"segment_id": x["segment_id"], "stage": stage, "reason": x["reason"],
                                                   "intent": x.get("intent"), "text": x.get("question") or x.get("claim"),
-                                                  "quote": x.get("quote")}
+                                                  "repair_of": x.get("repair_of"), "quote": x.get("quote")}
                                                  for r in topical for stage, items in (("fact", r["rejected_facts"]), ("question", r["rejected"]))
                                                  for x in items])
     _sheet(book, "Results", [
@@ -170,9 +181,17 @@ def run_export() -> Path:
                                                 for r in answerable], "pdf"))
     if templated:
         _sheet(book, "Metrics by intent", summary(templated, "intent"))
-    rejects = Counter((stage, reason_group(item["reason"])) for stage, rows in (("facts", facts), ("questions", questions))
-                      for r in rows for item in r["rejected"])
-    _sheet(book, "Audit reasons", [{"stage": s, "reason": reason, "count": n} for (s, reason), n in rejects.most_common()])
+    rejects = Counter((stage, reason_group(item["reason"])) for stage, rows, field in
+                      (("facts", facts, "rejected"), ("questions", questions, "rejected"),
+                       ("template facts", topical, "rejected_facts"), ("template questions", topical, "rejected"))
+                      for r in rows for item in r[field])
+    repairs = Counter((reason_group(q["repair_of"]), passed) for r in topical
+                      for items, passed in ((r["questions"], True), (r["rejected"], False)) for q in items if q.get("repair_of"))
+    keys = dict.fromkeys([key for key, _ in rejects.most_common()] + [("template questions", rule) for rule, _ in repairs])
+    _sheet(book, "Audit reasons", [  # rejections by rule; for template questions, also the repairs each rule set off
+        {"stage": s, "reason": reason, "count": rejects.get((s, reason), 0),
+         "repairs_tried": repairs[(reason, True)] + repairs[(reason, False)] if s == "template questions" else None,
+         "repairs_passed": repairs[(reason, True)] if s == "template questions" else None} for s, reason in keys])
     _sheet(book, "Checks", [{"stage": stage, "check": name, "ok": ok, "detail": detail}
                             for stage, checks in all_checks().items() for name, ok, detail in checks], bad=lambda row: not row["ok"])
     _sheet(book, "Agent calls", [{"time": t["time"], "run": t.get("run"), "role": t["role"], "label": t["label"],

@@ -159,10 +159,11 @@ def todo(done: dict[str, Any], doc: str | None, force: bool, current: Callable[[
     return [s for s in picked if stale(s)]
 
 
-def run_each(segments: list[dict[str, Any]], work: Callable[[dict], None], stage: str) -> None:
-    """Run `work` for each segment. A failed segment (e.g. the endpoint is down) is reported and left to do,
+def run_each(segments: list[Any], work: Callable[[Any], None], stage: str,
+             name: Callable[[Any], str] = lambda segment: segment["segment_id"]) -> None:
+    """Run `work` for each segment (or PDF). A failed one (e.g. the endpoint is down) is reported and left to do,
     and the stage carries on; it stops after MAX_FAILURES failures in a row. Any failure ends in a BenchError,
-    so `bench run` stops there; finished segments are already saved."""
+    so `bench run` stops there; finished ones are already saved."""
     failed, in_a_row = [], 0
     for segment in segments:
         try:
@@ -171,9 +172,9 @@ def run_each(segments: list[dict[str, Any]], work: Callable[[dict], None], stage
         except BenchError:
             raise
         except Exception as exc:
-            failed.append(segment["segment_id"])
+            failed.append(name(segment))
             in_a_row += 1
-            llm.console.print(f"  [red]✗ {escape(segment['segment_id'])}: {type(exc).__name__}: {escape(str(exc))}[/] [dim](left to do)[/]")
+            llm.console.print(f"  [red]✗ {escape(name(segment))}: {type(exc).__name__}: {escape(str(exc))}[/] [dim](left to do)[/]")
             if llm.VERBOSE:
                 llm.console.print_exception()
             if in_a_row >= MAX_FAILURES:
@@ -203,33 +204,51 @@ def _memory(found: list[dict[str, Any]]) -> str:
     return "\n".join(f"- {f['claim']}" for f in found) or "(none yet)"
 
 
-def planner_prompt(part: dict[str, Any], units: list[dict[str, Any]], text: str, found: list[dict], wanted: int) -> str:
+def paragraph_listing(units: list[dict[str, Any]], text: str) -> str:
+    """The units' text as numbered paragraphs ('[p3] first sentence second sentence'), as planners read it."""
     paragraphs: dict[str, list[str]] = {}
     for u in units:
         paragraphs.setdefault(u["id"].split(".")[0], []).append(_flat(text[u["start"] : u["end"]]))
-    listing = "\n\n".join(f"[{p}] {' '.join(s)}" for p, s in paragraphs.items())
+    return "\n\n".join(f"[{p}] {' '.join(s)}" for p, s in paragraphs.items())
+
+
+def planner_prompt(part: dict[str, Any], units: list[dict[str, Any]], text: str, found: list[dict], wanted: int) -> str:
     context = f"CONTEXT (end of the previous part, for understanding only):\n{part['context']}\n\n" if part["context"] else ""
     return (f"SECTION: {part['heading']}\n\n{context}FACTS SO FAR:\n{_memory(found)}\n\n"
-            f"Return at most {wanted} topics.\n\nTEXT:\n{listing}")
+            f"Return at most {wanted} topics.\n\nTEXT:\n{paragraph_listing(units, text)}")
 
 
-def extractor_prompt(heading: str, topic: Topic, units: list[dict[str, Any]], text: str, found: list[dict]) -> str:
+def extractor_prompt(heading: str, topic: Topic, units: list[dict[str, Any]], text: str, found: list[dict],
+                     brief: str = "", others: list[str] | None = None) -> str:
+    """The extractor's input. A planned pick (bench/orchestrator.py) has a brief, and instead of the facts found so
+    far it lists the other picks in its paragraphs, so picks don't depend on each other's order."""
     listing = "\n".join(f"[{u['id']}] {_flat(text[u['start'] : u['end']])}" for u in units)
-    return (f"SECTION: {heading}\nTOPIC: {topic.topic}\nKIND: {topic.kind}\n\n"
-            f"FACTS SO FAR (don't repeat them):\n{_memory(found)}\n\nSENTENCES:\n{listing}")
+    memory = ("OTHER PICKS IN THESE PARAGRAPHS (other workers write these; don't repeat them):\n"
+              + ("\n".join(f"- {o}" for o in others) or "(none)") if others is not None
+              else f"FACTS SO FAR (don't repeat them):\n{_memory(found)}")
+    return (f"SECTION: {heading}\nTOPIC: {topic.topic}\nKIND: {topic.kind}\n" + (f"BRIEF: {brief}\n" if brief else "")
+            + f"\n{memory}\n\nSENTENCES:\n{listing}")
 
 
-def review(agent: Agent[Any, Reviews], segment: dict[str, Any], found: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Apply the reviewer's verdicts: a rewrite replaces the claim (the original is kept); a flag is recorded
-    and the fact still goes to the audit. Facts whose sentence range can't be cut aren't shown to the
-    reviewer (the audit rejects them)."""
+def review_prompt(segment: dict[str, Any], found: list[dict[str, Any]]) -> str | None:
+    """The reviewer's input: each fact with its claim and quote, or None if no fact's sentence range can be cut
+    (the audit rejects those, so the reviewer doesn't see them)."""
     units = {u["id"]: u for u in sentences(segment["text"])}
     listing = [{"id": f"f{i}", "claim": f["claim"], "quote": _flat(with_header(segment["text"], *span))}
                for i, f in enumerate(found, start=1) if isinstance(span := span_of(f, units), tuple)]
-    verdicts = {}
-    if listing:
-        prompt = f"SECTION: {segment['title']}\n\nFACTS TO REVIEW:\n{json.dumps(listing, ensure_ascii=False, indent=1)}"
-        verdicts = {r.id: r for r in llm.call("reviewer", agent, prompt, segment["segment_id"]).reviews}
+    return f"SECTION: {segment['title']}\n\nFACTS TO REVIEW:\n{json.dumps(listing, ensure_ascii=False, indent=1)}" if listing else None
+
+
+def review(agent: Agent[Any, Reviews], segment: dict[str, Any], found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ask the reviewer about the facts and apply its verdicts (apply_reviews)."""
+    prompt = review_prompt(segment, found)
+    return apply_reviews(found, llm.call("reviewer", agent, prompt, segment["segment_id"]).reviews if prompt else [])
+
+
+def apply_reviews(found: list[dict[str, Any]], reviews: list[Review]) -> list[dict[str, Any]]:
+    """A rewrite replaces the claim (the original is kept); a flag is recorded and the fact still goes to the
+    audit; a fact the reviewer didn't answer is marked unreviewed."""
+    verdicts = {r.id: r for r in reviews}
     reviewed = []
     for i, f in enumerate(found, start=1):
         r = verdicts.get(f"f{i}")

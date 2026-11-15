@@ -127,9 +127,9 @@ def run(no_templates: bool = typer.Option(False, "--no-templates", help="Skip th
     from bench.evaluate import run_evaluate
     from bench.export import run_export
     from bench.facts import run_facts
+    from bench.orchestrator import run_templates
     from bench.questions import run_questions
     from bench.segments import run_segments
-    from bench.templates import run_templates
     from bench.testbed import run_index
 
     stages = {"segment": run_segments, "facts": run_facts, "questions": run_questions,
@@ -179,8 +179,9 @@ app.add_typer(templates_app, name="templates")
 @templates_app.command("run")
 @_command(writes=True)
 def templates_run(doc: str = DOC, force: bool = FORCE) -> None:
-    """Facts and questions aimed at each section's switched-on intents -> data/templates.jsonl."""
-    from bench.templates import run_templates
+    """Per PDF, the orchestrator plans facts and questions for each section's switched-on intents and workers
+    write them -> data/templates.jsonl."""
+    from bench.orchestrator import run_templates
 
     run_templates(doc=doc, force=force)
 
@@ -188,25 +189,32 @@ def templates_run(doc: str = DOC, force: bool = FORCE) -> None:
 @templates_app.command("list")
 @_command()
 def templates_list() -> None:
-    """Each template and its intents (on or off), and the sections it applies to (by the rules or by you)."""
+    """Each template and its intents (on or off), and the sections it applies to (by the orchestrator, the rules or you)."""
     from bench.segments import load_segments
-    from bench.templates import assigned, is_on, load_topics, templates
+    from bench.templates import (
+        assigned,
+        categorised,
+        is_on,
+        load_topics,
+        pdf_rows,
+        templates,
+    )
 
-    tmpls, topics = templates(), load_topics()
+    tmpls, topics, saved = templates(), load_topics(), categorised(pdf_rows())
     for name, t in tmpls.items():
         intents = ", ".join(i if is_on(topics, name, t, i) else f"{i} (off)" for i in t.intents)
         typer.echo(f"{name} [{'on' if is_on(topics, name, t) else 'off'}]: {intents}")
     typer.echo("")
     for segment in (s for s in load_segments() if s["use_for_questions"]):
-        names, by = assigned(segment, tmpls, topics)
+        names, by = assigned(segment, tmpls, topics, saved)
         typer.echo(f"  {segment['segment_id']}: {', '.join(names) or '-'} ({by})")
 
 
 @templates_app.command("assign")
 @_command(writes=True)
 def templates_assign(section: str = typer.Argument(..., help="A section id, or part of one (e.g. a PDF's name)"),
-                     names: str = typer.Argument(..., help="Templates, comma-separated; 'none' for no template; 'auto' to let the rules decide again")) -> None:
-    """Override the automatic categorisation for the matching sections."""
+                     names: str = typer.Argument(..., help="Templates, comma-separated; 'none' for no template; 'auto' to let the orchestrator decide again")) -> None:
+    """Override the orchestrator's categorisation for the matching sections."""
     from bench.segments import load_segments
     from bench.templates import load_topics, save_topics, templates
 
@@ -223,7 +231,7 @@ def templates_assign(section: str = typer.Argument(..., help="A section id, or p
         else:
             topics["sections"][sid] = chosen
     save_topics(topics)
-    typer.echo(f"{len(matched)} section(s): {'categorised by the rules' if names == 'auto' else ', '.join(chosen) or 'no template'}")
+    typer.echo(f"{len(matched)} section(s): {'categorised by the orchestrator' if names == 'auto' else ', '.join(chosen) or 'no template'}")
 
 
 def _switch(name: str, intent: str | None, on: bool) -> None:
@@ -263,15 +271,18 @@ def templates_coverage() -> None:
     from bench.segments import load_segments
     from bench.templates import (
         COVERAGE,
-        ROWS,
+        by_section,
+        categorised,
         coverage,
         coverage_report,
         load_topics,
+        pdf_rows,
         templates,
     )
 
-    tmpls = templates()
-    rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics(), load_rows(ROWS))
+    tmpls, template_rows = templates(), pdf_rows()
+    rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics(), by_section(template_rows),
+                    categorised(template_rows))
     write_text(COVERAGE, coverage_report(rows, tmpls))
     for name in tmpls:
         counts = Counter(r["status"] for r in rows if r["template"] == name)

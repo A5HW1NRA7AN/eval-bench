@@ -1,23 +1,17 @@
-"""Topic templates: what users ask about one kind of document (templates/<name>.toml), and which sections each
-template applies to.
+"""Topic templates: what users ask about one kind of document (templates/<name>.toml), which sections each
+template applies to, and the audit of the facts and questions written for them.
 
 A template lists intents (e.g. symptoms, vaccination schedule), each with cue words and, for figure intents,
-an answer shape. Code categorises every section by itself: a template applies when its signal words are dense
-enough in the section (and, if the template asks, the section is dense with numbers). Your overrides and
-on/off switches live in data/topics.json. `bench templates coverage` reports, with no LLM, which intents each
-section states and which of them the facts and questions cover.
+an answer shape. Which templates a section answers is decided by the orchestrator (bench/orchestrator.py), which
+saves its decision on each PDF's row; your overrides and on/off switches live in data/topics.json, and code's
+density rules (signal words per 1,000 words, numbers per word) are its hints and its fallback.
+`bench templates coverage` reports, with no LLM, which intents each section states and which of them the
+facts and questions cover.
 
-`bench templates run` writes questions aimed at the intents, per section and alongside the general ones:
-1. code finds the parts of a section where a switched-on intent's cue words occur (other parts cost no call);
-2. intent planner: picks topics in a part, each an intent and its subject (code drops a subject the section
-   never names);
-3. the facts stage's extractor and reviewer write and review one fact per topic; a table row can be a fact;
-4. the regex audit: the fact rules, plus a cue word in the quote (or its table header, or the heading line
-   above), a figure intent's answer shape, and the subject named in the quote or its headings;
-5. writers in the template's styles (types from question_types.toml), then the question reviewer and the
-   audit: the style's rules, the subject named in the question, and not the same as a general question.
-Output: one line per section in data/templates.jsonl {segment_id, templates, fingerprint, facts,
-rejected_facts, questions, rejected}; ids <section>:tf01 (facts) and <section>:t01 (questions).
+The intent audit (regex, after the fact rules): a cue word in the text the audit reads around the quote (`near`:
+the headings of its pages and up to CUE_BEFORE characters before it), a figure intent's answer shape, and the
+subject named in or up to SUBJECT_BEFORE characters before the quote, its headings or the document title.
+A template question must pass its style's rules, name its subject and not repeat a general question.
 """
 
 from __future__ import annotations
@@ -28,21 +22,13 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    ValidationError,
-    create_model,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from bench import facts as fact_stage
-from bench import llm
 from bench import questions as question_stage
-from bench.config import DATA_DIR, PART_CHARS, ROOT, BenchError, question_types
-from bench.pdf import PAGES, read_jsonl, write_jsonl, write_text
-from bench.segments import heading_path, load_segments, page_at, parts, sentences
+from bench.config import DATA_DIR, ROOT, BenchError, question_types
+from bench.pdf import PAGES, read_jsonl, write_text
+from bench.segments import heading_path, load_segments, page_at
 from bench.verify import (
     SHAPES,
     content_words,
@@ -51,16 +37,13 @@ from bench.verify import (
     kept_fact_problem,
     plain,
     question_problem,
-    uid,
-    verify_facts,
 )
 
 TEMPLATES_DIR = ROOT / "templates"
 TOPICS = DATA_DIR / "topics.json"
 COVERAGE = DATA_DIR / "coverage.md"
 ROWS = DATA_DIR / "templates.jsonl"
-TEMPLATES_VERSION = "templates-v1"  # the row format; part of every row's fingerprint
-TOPICS_PER_INTENT = 2  # topics the planner may pick per intent in one part
+TEMPLATES_VERSION = "templates-v2"  # the row format (one row per PDF); part of every row's fingerprint
 HEADING_CHARS = 80  # a short line just above a quote counts as its heading (e.g. "SYMPTOMS:")
 CUE_BEFORE = 600  # a template fact's cue may be this many characters before it ("Symptoms:" above a list)
 SUBJECT_BEFORE = 1200  # its subject may be named this far before it (a disease's heading above its blocks)
@@ -91,7 +74,7 @@ class Template(BaseModel):
     description: str = Field(min_length=1)
     subject: str = ""
     signals: list[str] = Field(min_length=1)
-    min_density: float = 6.0  # signal words per 1,000 words
+    min_density: float = 6.0  # signal words per 1,000 words for the density rule
     min_numbers_per_word: float = 0.0
     styles: dict[str, int] = {"direct": 1, "paraphrased": 1}  # question types (question_types.toml) and questions per fact
     intents: dict[str, Intent] = Field(min_length=1)
@@ -155,13 +138,22 @@ def scores(segment: dict[str, Any], tmpls: dict[str, Template]) -> dict[str, dic
                    "numbers_per_word": round(numbers, 3)} for name, t in tmpls.items()}
 
 
-def assigned(segment: dict[str, Any], tmpls: dict[str, Template], topics: dict[str, Any]) -> tuple[list[str], str]:
-    """(templates, by): your override from data/topics.json, else every template whose thresholds the section meets."""
-    if segment["segment_id"] in topics["sections"]:
-        return topics["sections"][segment["segment_id"]], "you"
-    found = [name for name, s in scores(segment, tmpls).items()
-             if s["density"] >= tmpls[name].min_density and s["numbers_per_word"] >= tmpls[name].min_numbers_per_word]
-    return found, "rules"
+def by_rules(segment: dict[str, Any], tmpls: dict[str, Template]) -> list[str]:
+    """The density rules: every template whose thresholds the section meets."""
+    return [name for name, s in scores(segment, tmpls).items()
+            if s["density"] >= tmpls[name].min_density and s["numbers_per_word"] >= tmpls[name].min_numbers_per_word]
+
+
+def assigned(segment: dict[str, Any], tmpls: dict[str, Template], topics: dict[str, Any],
+             saved: dict[str, dict[str, Any]] | None = None) -> tuple[list[str], str]:
+    """(templates, by): your override from data/topics.json, else the orchestrator's saved decision (`saved`,
+    see categorised), else the density rules."""
+    sid = segment["segment_id"]
+    if sid in topics["sections"]:
+        return topics["sections"][sid], "you"
+    if saved and sid in saved:
+        return saved[sid]["templates"], saved[sid]["by"]
+    return by_rules(segment, tmpls), "rules"
 
 
 def heading_above(text: str, start: int) -> str:
@@ -170,10 +162,22 @@ def heading_above(text: str, start: int) -> str:
     return lines[-1] if lines and len(lines[-1]) <= HEADING_CHARS and not lines[-1].endswith(".") else ""
 
 
+def near(segment: dict[str, Any], start: int, end: int, before: int) -> str:
+    """What the audit reads around text[start:end]: the heading path of every page it covers, then the text from
+    `before` characters ahead of it to its end."""
+    pages = [page_at(segment, start)] + [s["page"] for s in segment["page_spans"] if s["start"] < end and s["end"] > start]
+    return "\n".join([*dict.fromkeys(heading_path(segment, p) for p in pages), segment["text"][max(0, start - before) : end]])
+
+
+def subject_window(segment: dict[str, Any], start: int, end: int) -> str:
+    """Where a subject must be named for text[start:end]: the document's and the section's titles, and near()."""
+    return "\n".join([Path(segment["file_name"]).stem, segment["title"], near(segment, start, end, SUBJECT_BEFORE)])
+
+
 def intent_problem(fact: dict[str, Any], text: str, intent: Intent, before: str = "") -> str | None:
     """Why a fact doesn't speak to the intent, by code, or None: a cue word must be in its quote, its table header,
-    the heading line just above it or (for a fact written for the intent) `before`: its TOC headings and the text
-    just before it; a figure intent's answer shape must be in the quote (a table row's values take their unit
+    the heading line just above it or (for a fact written for the intent) `before`: the text the audit reads
+    around it (near); a figure intent's answer shape must be in the quote (a table row's values take their unit
     from the header)."""
     window = "\n".join([before, heading_above(text, fact.get("header_start", fact["start"])), fact.get("header", ""), fact["quote"]])
     if not cue_pattern(intent.cues).search(window):
@@ -214,14 +218,16 @@ def names(subject: str, text: str) -> bool:
 
 
 def coverage(segments: list[dict[str, Any]], facts_rows: dict[str, dict], question_rows: dict[str, dict],
-             tmpls: dict[str, Template], topics: dict[str, Any], template_rows: dict[str, dict] | None = None) -> list[dict[str, Any]]:
+             tmpls: dict[str, Template], topics: dict[str, Any], template_rows: dict[str, dict] | None = None,
+             saved: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """One row per (section, template, switched-on intent) with a status computed by code:
     covered (a kept question), facts only, stated but missing (cue words occur, no fact), not stated.
-    General facts are tagged by code (fact_intents); template facts count for their own intent."""
+    General facts are tagged by code (fact_intents); template facts (template_rows, by section) count for their
+    own intent. `saved` is the orchestrator's categorisation (categorised)."""
     rows = []
     for segment in (s for s in segments if s["use_for_questions"]):
         sid, text = segment["segment_id"], segment["text"]
-        names, by = assigned(segment, tmpls, topics)
+        names, by = assigned(segment, tmpls, topics, saved)
         topical = (template_rows or {}).get(sid, {})
         facts = facts_rows.get(sid, {}).get("facts", []) + topical.get("facts", [])
         questions = question_rows.get(sid, {}).get("questions", []) + topical.get("questions", [])
@@ -274,33 +280,10 @@ def coverage_report(rows: list[dict[str, Any]], tmpls: dict[str, Template]) -> s
     return "\n".join(lines)
 
 
-PLANNER_PROMPT = """You plan a search benchmark for one kind of document. The TEXT is one part of a document \
-section, in numbered paragraphs ([p3]); a table is a paragraph whose lines are rows of cells joined by " | ", \
-its header rows first. For each INTENT below that the TEXT answers with specific information, pick topics it \
-states, each about a different subject or detail. Skip what is under FACTS SO FAR and the CONTEXT. For each give:
-- intent: the intent's name.
-- subject: the SUBJECT the topic belongs to, the name a user would put in their question (a disease, a scheme, \
-a measure), written exactly as the TEXT or the SECTION heading writes it; not the detail the topic covers.
-- paragraphs: the ids of the paragraphs that state it (usually one, at most three consecutive).
-Return at most the number of topics asked for, or an empty list if the TEXT answers none of the INTENTS."""
-
-TABLE_NOTE = """
-
-A table row (cells joined by " | ") counts as one sentence. For a figure in a table, point at the one row \
-that holds it (first and last are that row); the table's header rows come first. Name the row's and the \
-column's labels in the claim."""
-EXTRACTOR_PROMPT = fact_stage.EXTRACTOR_PROMPT + TABLE_NOTE
-
-
-def plan_schema(intents: list[str]) -> type[BaseModel]:
-    """The planner's answer, its intent limited to the intents asked for."""
-    topic = create_model("IntentTopic", intent=(Literal[tuple(intents)], ...), subject=(str, ...), paragraphs=(list[str], ...))
-    return create_model("IntentTopics", topics=(list[topic], ...))  # type: ignore[valid-type]
-
-
-def active(segment: dict[str, Any], tmpls: dict[str, Template], topics: dict[str, Any]) -> dict[str, list[str]]:
-    """The section's switched-on templates (by the rules or by you), each with its switched-on intents."""
-    names_, _ = assigned(segment, tmpls, topics)
+def active(segment: dict[str, Any], tmpls: dict[str, Template], topics: dict[str, Any],
+           saved: dict[str, dict[str, Any]] | None = None) -> dict[str, list[str]]:
+    """The section's switched-on templates (assigned), each with its switched-on intents."""
+    names_, _ = assigned(segment, tmpls, topics, saved)
     out = {n: [i for i in tmpls[n].intents if is_on(topics, n, tmpls[n], i)] for n in names_ if n in tmpls and is_on(topics, n, tmpls[n])}
     return {n: intents for n, intents in out.items() if intents}
 
@@ -313,30 +296,16 @@ def styles(tmpls: dict[str, Template]) -> dict[str, dict]:
     return {s: types[s] for s in sorted(used)}
 
 
-def fingerprint(segment: dict[str, Any], on: dict[str, list[str]], tmpls: dict[str, Template], kinds: dict[str, dict]) -> str:
-    """Everything that made a row: the prompts and schemas, the switched-on templates and intents, the styles'
-    definitions, and the section's text and headings."""
-    told = {n: {k: t[k] for k in ("prompt", "rules", "review")} for n, t in kinds.items()}
-    used = {n: tmpls[n].model_dump(exclude={"intents", "enabled"}) | {"intents": {i: tmpls[n].intents[i].model_dump() for i in on[n]}}
-            for n in sorted(on)}
-    schemas = [m.model_json_schema() for m in (fact_stage.Pointers, fact_stage.Reviews, question_stage.Drafts, question_stage.Reviews)]
-    return uid(TEMPLATES_VERSION, PLANNER_PROMPT, EXTRACTOR_PROMPT, fact_stage.REVIEWER_PROMPT, question_stage.WRITER_PROMPT,
-               question_stage.REVIEWER_PROMPT, schemas, used, told, TOPICS_PER_INTENT, PART_CHARS,
-               fact_stage.text_hash(segment["text"]), segment["headings"], segment["title"])
-
-
 def template_fact_problem(fact: dict[str, Any], segment: dict[str, Any], tmpls: dict[str, Template]) -> str | None:
     """Why a template fact fails the intent audit (after the fact rules), or None."""
     tmpl = tmpls.get(fact["template"])
     if tmpl is None or fact["intent"] not in tmpl.intents:
         return "its template or intent no longer exists"
-    text, anchor = segment["text"], fact.get("header_start", fact["start"])
-    path = heading_path(segment, page_at(segment, fact["start"]))
-    if problem := intent_problem(fact, text, tmpl.intents[fact["intent"]], path + "\n" + text[max(0, anchor - CUE_BEFORE) : anchor]):
+    anchor = fact.get("header_start", fact["start"])
+    if problem := intent_problem(fact, segment["text"], tmpl.intents[fact["intent"]], near(segment, anchor, fact["end"], CUE_BEFORE)):
         return problem
-    near = "\n".join([Path(segment["file_name"]).stem, path, segment["title"], text[max(0, anchor - SUBJECT_BEFORE) : anchor],
-                      fact.get("header", ""), fact["quote"]])
-    return None if names(fact["subject"], near) else f"subject \"{fact['subject']}\" isn't named in or just before the quote, its headings or the document title"
+    around = subject_window(segment, anchor, fact["end"]) + "\n" + fact.get("header", "")
+    return None if names(fact["subject"], around) else f"subject \"{fact['subject']}\" isn't named in or just before the quote, its headings or the document title"
 
 
 def template_question_problem(q: dict[str, Any], facts: dict[str, dict], kinds: dict[str, dict], corpus: str,
@@ -360,126 +329,45 @@ def inputs() -> tuple[dict[str, Template], dict[str, Any], dict[str, dict], str,
     return tmpls, load_topics(), styles(tmpls), corpus, general
 
 
-def row_problems(row: dict[str, Any], segment: dict[str, Any], tmpls: dict[str, Template], kinds: dict[str, dict],
-                 corpus: str, general: set[str]) -> list[str]:
-    """Kept facts and questions of a row that no longer pass the audit, as 'id (reason)'."""
+def pdf_rows() -> list[dict[str, Any]]:
+    """data/templates.jsonl in today's format, one row per PDF; rows in an older format are left out (and redone)."""
+    return [r for r in read_jsonl(ROWS) if r.get("version") == TEMPLATES_VERSION] if ROWS.exists() else []
+
+
+def by_section(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Each section's template facts and questions, kept and rejected, gathered from the PDF rows."""
+    out: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for r in rows:
+        for field in ("facts", "questions", "rejected_facts", "rejected"):
+            for item in r[field]:
+                out.setdefault(item["segment_id"], {"facts": [], "questions": [], "rejected_facts": [], "rejected": []})[field].append(item)
+    return out
+
+
+def categorised(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The saved categorisation of every section: {segment_id: {"templates": [...], "by": orchestrator|rules|you}}."""
+    return {sid: c for r in rows for sid, c in r["sections"].items()}
+
+
+def row_problems(row: dict[str, Any], segments: dict[str, dict[str, Any]], tmpls: dict[str, Template],
+                 kinds: dict[str, dict], corpus: str, general: set[str]) -> list[str]:
+    """Kept facts and questions of a PDF's row that no longer pass the audit, as 'id (reason)'."""
     by_id = {f["fact_id"]: f for f in row["facts"]}
-    found = [f"{f['fact_id']} ({p})" for f in row["facts"]
-             if (p := kept_fact_problem(f, segment) or template_fact_problem(f, segment, tmpls))]
+    found = []
+    for f in row["facts"]:
+        segment = segments.get(f["segment_id"])
+        if problem := ("its section no longer exists" if segment is None
+                       else kept_fact_problem(f, segment) or template_fact_problem(f, segment, tmpls)):
+            found.append(f"{f['fact_id']} ({problem})")
     return found + [f"{q['question_id']} ({p})" for q in row["questions"]
                     if (p := template_question_problem(q, by_id, kinds, corpus, general))]
 
 
-def run_templates(doc: str | None = None, force: bool = False) -> None:
-    """Template facts and questions for every section with a switched-on template -> data/templates.jsonl."""
-    tmpls, topics, kinds, corpus, general = inputs()
-    done = fact_stage.load_rows(ROWS)
-    extractor, fact_reviewer = llm.agent(fact_stage.Pointers, EXTRACTOR_PROMPT), llm.agent(fact_stage.Reviews, fact_stage.REVIEWER_PROMPT)
-    writers = {n: llm.agent(question_stage.Drafts, question_stage.WRITER_PROMPT + f"{n}: {t['prompt']}") for n, t in kinds.items()}
-    described = "\n".join(f"- {n}: {t['review'] or ' '.join(t['prompt'].split())}" for n, t in kinds.items())
-    question_reviewer = llm.agent(question_stage.Reviews, question_stage.REVIEWER_PROMPT + described)
-
-    def current(segment: dict[str, Any]) -> str:
-        return fingerprint(segment, active(segment, tmpls, topics), tmpls, kinds)
-
-    def valid(row: dict[str, Any], segment: dict[str, Any]) -> bool:
-        return not row_problems(row, segment, tmpls, kinds, corpus, general)
-
-    def work(segment: dict[str, Any]) -> None:
-        sid, on = segment["segment_id"], active(segment, tmpls, topics)
-        found = [f for name, intents in on.items() for f in plan_and_extract(segment, name, tmpls[name], intents, extractor)]
-        kept, rejected = verify_facts(segment, fact_stage.review(fact_reviewer, segment, found) if found else [], prefix="tf")
-        for f in list(kept):
-            if problem := template_fact_problem(f, segment, tmpls):
-                kept.remove(f)
-                rejected.append({**f, "reason": problem, "decided_by": "audit"})
-        for n, f in enumerate(kept, start=1):
-            f["fact_id"] = f"{sid}:tf{n:02d}"
-        questions, rejected_questions = [], []
-        for name in on:
-            mine = {f"f{i}": f for i, f in enumerate(kept, start=1) if f["template"] == name}
-            good, bad = write_questions(segment, tmpls[name], mine, kinds, writers, question_reviewer, corpus, general)
-            questions += good
-            rejected_questions += bad
-        for n, q in enumerate(questions, start=1):
-            q["question_id"] = f"{sid}:t{n:02d}"
-        done[sid] = {"segment_id": sid, "model": llm.settings().llm_model, "version": TEMPLATES_VERSION,
-                     "fingerprint": current(segment), "templates": on, "facts": kept, "rejected_facts": rejected,
-                     "questions": questions, "rejected": rejected_questions}
-        write_jsonl(ROWS, list(done.values()))
-        if on:
-            fact_stage.audit_line(sid, "template facts", kept, rejected)
-            fact_stage.audit_line(sid, "template questions", questions, rejected_questions)
-
-    rows_before = set(done)
-    stale = fact_stage.todo(done, doc, force, current, valid)
-    if set(done) != rows_before:
-        write_jsonl(ROWS, list(done.values()))
-    fact_stage.run_each(stale, work, "templates run")
-
-
-def plan_and_extract(segment: dict[str, Any], name: str, tmpl: Template, intents: list[str], extractor: Any) -> list[dict[str, Any]]:
-    """One template's facts in a section, before the audit: per part where its intents' cue words occur, the
-    planner's topics (a subject the section never names is dropped), then one extracted fact per topic."""
-    sid, text, units = segment["segment_id"], segment["text"], sentences(segment["text"])
-    known = "\n".join([segment["title"], *(h["title"] for h in segment["headings"]), text])
-    found: list[dict[str, Any]] = []
-    for i, part in enumerate(cut := parts(segment, PART_CHARS)):
-        cued = [n for n in intents if cue_pattern(tmpl.intents[n].cues).search(part["heading"] + "\n" + part["text"])]
-        inside = [u for u in units if part["start"] <= u["start"] < part["end"]]
-        if not cued or not inside:
-            continue  # no call for a part that states none of the intents
-        wanted = TOPICS_PER_INTENT * len(cued)
-        listed = "\n".join(f"- {n}: {tmpl.intents[n].description}" for n in cued)
-        prompt = (f"DOCUMENT TYPE: {tmpl.description}\nSUBJECT: {tmpl.subject or 'what the passage is about'}\nINTENTS:\n{listed}\n\n"
-                  + fact_stage.planner_prompt(part, inside, text, found, wanted))
-        label = f"{sid} {name} part {i + 1}/{len(cut)}"
-        plan = llm.call("intent planner", llm.agent(plan_schema(cued), PLANNER_PROMPT), prompt, label)
-        for topic in plan.topics[:wanted]:
-            chosen = [u for u in inside if u["id"].split(".")[0] in fact_stage.paragraph_ids(topic.paragraphs)]
-            if not chosen or not topic.subject.strip() or not names(topic.subject, known):
-                continue  # paragraphs outside this part, or a subject the section never names
-            intent = tmpl.intents[topic.intent]
-            pick = fact_stage.Topic(topic=f"{intent.description} Subject: {topic.subject}.", kind=intent.kind, paragraphs=topic.paragraphs)
-            heading = heading_path(segment, page_at(segment, chosen[0]["start"]))
-            out = llm.call("extractor", extractor, fact_stage.extractor_prompt(heading, pick, chosen, text, found),
-                           f"{label} ▸ {topic.intent} ▸ {topic.subject[:40]}")
-            example = intent.examples[0].replace("{subject}", topic.subject)
-            found += [{**f.model_dump(), "topic": pick.topic, "kind": intent.kind, "template": name, "intent": topic.intent,
-                       "subject": topic.subject, "example": example} for f in out.facts[:1]]
-    return found
-
-
-def write_questions(segment: dict[str, Any], tmpl: Template, facts: dict[str, dict], kinds: dict[str, dict], writers: dict[str, Any],
-                    reviewer: Any, corpus: str, general: set[str]) -> tuple[list[dict], list[dict]]:
-    """Questions in the template's styles about one template's facts in a section, reviewed and audited."""
-    if not facts:
-        return [], []
-    sid, title = segment["segment_id"], segment["title"]
-    drafts: list[dict[str, Any]] = []
-    for style, per_fact in tmpl.styles.items():
-        memory = "\n".join(f"- [{q['type']}, {', '.join(q['fact_ids'])}] {q['question']}" for q in drafts) or "(none yet)"
-        prompt = (f"SECTION: {title}\nDOCUMENT TYPE: {tmpl.description}\n\nEach fact answers something users ask about this "
-                  "kind of document. It names its subject and gives an example of such a question: write in that spirit, "
-                  f"name the subject, and ask about each fact.\n\nQUESTIONS ALREADY WRITTEN:\n{memory}\n\n"
-                  f"Write at most {per_fact * len(facts)} questions.\n\nFACTS:\n{question_stage.listing(facts)}")
-        out = llm.call(f"{style} writer", writers[style], prompt, f"{sid} templates")
-        drafts += [{"type": style, **d.model_dump()} for d in out.questions[: per_fact * len(facts)]]
-    kept, rejected = [], []
-    for q in question_stage.review(reviewer, title, drafts, facts, f"{sid} templates"):
-        if problem := template_question_problem(q, facts, kinds, corpus, general):
-            rejected.append({**q, "reason": problem, "decided_by": "audit"})
-        else:
-            first = facts.get(q["fact_ids"][0], {})
-            kept.append({**q, "template": first["template"], "intent": first["intent"], "subject": first["subject"]})
-    return question_stage.finish(kept, facts, kinds, sid), rejected
-
-
 def current_questions() -> list[dict[str, Any]]:
     """Template questions whose template and intent are switched on for their section now: what evaluate scores."""
-    if not ROWS.exists():
+    rows = pdf_rows()
+    if not rows:
         return []
-    tmpls, topics = templates(), load_topics()
-    segments = {s["segment_id"]: s for s in load_segments() if s["use_for_questions"]}
-    on = {sid: active(s, tmpls, topics) for sid, s in segments.items()}
-    return [q for row in read_jsonl(ROWS) for q in row["questions"] if q["intent"] in on.get(row["segment_id"], {}).get(q["template"], [])]
+    tmpls, topics, saved = templates(), load_topics(), categorised(rows)
+    on = {s["segment_id"]: active(s, tmpls, topics, saved) for s in load_segments() if s["use_for_questions"]}
+    return [q for r in rows for q in r["questions"] if q["intent"] in on.get(q["segment_id"], {}).get(q["template"], [])]

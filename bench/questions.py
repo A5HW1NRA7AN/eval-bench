@@ -130,7 +130,7 @@ def library_fingerprint(types: dict[str, dict], facts_rows: list[dict[str, Any]]
 def listing(facts: dict[str, dict[str, Any]], titles: dict[str, str] | None = None) -> str:
     rows = [{"id": k, **({"section": titles[f["fact_id"].rsplit(":", 1)[0]]} if titles else {}),
              "claim": f["claim"], "quote": " ".join(evidence_text(f).split()),
-             **{k: f[k] for k in ("subject", "example") if k in f}} for k, f in facts.items()]
+             **{k: f[k] for k in ("subject", "example", "brief") if k in f}} for k, f in facts.items()]
     return json.dumps(rows, ensure_ascii=False, indent=1)
 
 
@@ -153,18 +153,28 @@ def write(agents: dict[str, Agent], types: dict[str, dict], name: str, title: st
     return [{"type": name, **d.model_dump()} for d in out.questions[: t["count"]]]
 
 
-def review(reviewer: Agent[Any, Reviews], title: str, drafts: list[dict[str, Any]], facts: dict[str, dict],
-           label: str) -> list[dict[str, Any]]:
-    """Apply the reviewer's verdicts: a rewrite keeps the original question; a flag is recorded and the draft
-    still goes to the audit."""
+def review_prompt(title: str, drafts: list[dict[str, Any]], facts: dict[str, dict]) -> str | None:
+    """The question reviewer's input: every draft with its type, answer, fact ids and quotes (None if no drafts)."""
     if not drafts:
-        return []
+        return None
     listing = [{"id": f"d{i}", "type": d["type"], "question": d["question"], "answer": d["answer"] or "(none)",
                 "fact_ids": d["fact_ids"], **({"absent_term": d["absent_term"]} if d.get("absent_term") else {}),
                 "quotes": [" ".join(evidence_text(facts[k]).split()) for k in d["fact_ids"] if k in facts]}
                for i, d in enumerate(drafts, start=1)]
-    prompt = f"SECTION: {title}\n\nQUESTIONS TO REVIEW:\n{json.dumps(listing, ensure_ascii=False, indent=1)}"
-    verdicts = {r.id: r for r in llm.call("question reviewer", reviewer, prompt, label).reviews}
+    return f"SECTION: {title}\n\nQUESTIONS TO REVIEW:\n{json.dumps(listing, ensure_ascii=False, indent=1)}"
+
+
+def review(reviewer: Agent[Any, Reviews], title: str, drafts: list[dict[str, Any]], facts: dict[str, dict],
+           label: str) -> list[dict[str, Any]]:
+    """Ask the question reviewer about the drafts and apply its verdicts (apply_reviews)."""
+    prompt = review_prompt(title, drafts, facts)
+    return apply_reviews(drafts, llm.call("question reviewer", reviewer, prompt, label).reviews) if prompt else []
+
+
+def apply_reviews(drafts: list[dict[str, Any]], reviews: list[Review]) -> list[dict[str, Any]]:
+    """A rewrite replaces the question (the original is kept); a flag is recorded and the draft still goes to
+    the audit; a draft the reviewer didn't answer is marked unreviewed."""
+    verdicts = {r.id: r for r in reviews}
     reviewed = []
     for i, d in enumerate(drafts, start=1):
         r = verdicts.get(f"d{i}")

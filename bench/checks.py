@@ -14,14 +14,13 @@ from bench.config import PDF_DIR, BenchError, question_types
 from bench.evaluate import REPORT, RESULTS
 from bench.facts import FACTS, fact_budget
 from bench.facts import fingerprint as facts_fingerprint
+from bench.orchestrator import fingerprint as template_fingerprint
 from bench.pdf import PAGES, read_jsonl
 from bench.questions import LIBRARY, QUESTIONS, library_fingerprint, split_types
 from bench.questions import fingerprint as questions_fingerprint
 from bench.segments import INGEST, SEGMENTS
-from bench.templates import ROWS as TEMPLATE_ROWS
-from bench.templates import active, load_topics, row_problems, templates
+from bench.templates import categorised, load_topics, pdf_rows, row_problems, templates
 from bench.templates import current_questions as current_template_questions
-from bench.templates import fingerprint as template_fingerprint
 from bench.templates import inputs as template_inputs
 from bench.testbed import CHUNKS, COLLECTION, qdrant
 from bench.verify import find, kept_fact_problem, question_problem, reason_group
@@ -196,20 +195,25 @@ def check_templates() -> list[Check]:
     if not SEGMENTS.exists():
         return checks
     tmpls, topics, kinds, corpus, general = template_inputs()
-    rows = {r["segment_id"]: r for r in _rows(TEMPLATE_ROWS)}
-    used = [s for s in _rows(SEGMENTS) if s["use_for_questions"]]
-    on = {s["segment_id"]: active(s, tmpls, topics) for s in used}
-    stale = [s["segment_id"] for s in used if on[s["segment_id"]] and (s["segment_id"] not in rows
-             or rows[s["segment_id"]].get("fingerprint") != template_fingerprint(s, on[s["segment_id"]], tmpls, kinds))]
-    failing = [p for s in used if s["segment_id"] in rows and on[s["segment_id"]]
-               for p in row_problems(rows[s["segment_id"]], s, tmpls, kinds, corpus, general)]
-    kept = [q for s in used if on[s["segment_id"]] for q in rows.get(s["segment_id"], {}).get("questions", [])]
-    facts = sum(len(rows.get(sid, {}).get("facts", [])) for sid in on if on[sid])
+    rows = {r["file_name"]: r for r in pdf_rows()}
+    pdfs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for s in _rows(SEGMENTS):
+        if s["use_for_questions"]:
+            pdfs[s["file_name"]].append(s)
+    stale = [n for n, segs in pdfs.items() if n not in rows or rows[n]["fingerprint"] != template_fingerprint(segs, tmpls, topics, kinds)]
+    stale += [n for n in rows if n not in pdfs]  # rows of PDFs that are gone
+    failed = {n: len(r["failed_calls"]) for n, r in rows.items() if r["failed_calls"]}
+    failing = [p for n, r in rows.items() if n in pdfs
+               for p in row_problems(r, {s["segment_id"]: s for s in pdfs[n]}, tmpls, kinds, corpus, general)]
+    by = Counter(c["by"] for c in categorised(list(rows.values())).values() if c["templates"])
     return checks + [
-        ("every section with a switched-on template has template questions made from today's inputs", not stale,
-         f"{sum(map(bool, on.values()))} sections with templates" + (f"; stale or missing: {stale[:3]} (run `bench templates run`)" if stale else "")),
+        ("every PDF has template questions made from today's inputs", not stale,
+         f"{len(pdfs) - len([n for n in stale if n in pdfs])} of {len(pdfs)} PDFs current; sections with templates, by who "
+         f"decided: {dict(by)}" + (f"; stale or missing: {stale[:3]} (run `bench templates run`)" if stale else "")
+         + (f"; calls that failed (retried on the next run): {failed}" if failed else "")),
         ("every template fact and question still passes the audit", not failing,
-         f"{facts} facts, {len(kept)} questions" + (f"; failing: {failing[:3]}" if failing else "")),
+         f"{sum(len(r['facts']) for r in rows.values())} facts, {len(current_template_questions())} questions"
+         + (f"; failing: {failing[:3]}" if failing else "")),
     ]
 
 

@@ -101,7 +101,16 @@ The `facts` and `questions` stages save after every segment (atomically, so a st
 
 **Troubleshooting.** `✗ another bench command is writing data/`: wait for the other run. `N sections failed in a row`: the LLM endpoint is probably down (the remote Gemma 4 endpoint is up until about 9 pm IST); re-run later and it resumes. `Qdrant is not reachable`: `docker compose up -d`. `bench index` only rebuilds a local Qdrant.
 
-**Switching to Gemma 4:** set `LLM_PROVIDER=gemma` in `.env`, or prefix a single command (`LLM_PROVIDER=gemma uv run bench questions`). The remote endpoint is only up in the daytime.
+**Switching to Gemma 4:** set `LLM_PROVIDER=gemma` in `.env`, or prefix a single command (`LLM_PROVIDER=gemma uv run bench questions`). The remote endpoint (our self-hosted Gemma 4 31B, the primary model) is only up in the daytime; the local 12B is the fallback.
+
+**Each model brings its own defaults** (`bench/config.py`), overridable in `.env`:
+
+| Setting | gemma (31B) | ollama (12B) |
+|---|---|---|
+| `LLM_CONCURRENCY`: LLM calls at once (the template stage runs each step's calls together) | 8 | 1 |
+| `ORCHESTRATOR_TEXT_CHARS`: how much PDF text the orchestrator may read beside its map | 300,000 | 0 (the map only) |
+
+Both are recorded on each row and in the run manifest; like the model, they aren't fingerprinted, so switching models doesn't redo finished rows (`--force` does). Ollama's context length must be at least 32K: set it in Ollama.app or with `OLLAMA_CONTEXT_LENGTH`, because its `/v1` API can't set it per request.
 
 ## Topic templates
 
@@ -110,20 +119,31 @@ A template describes what users ask about one *kind* of document, whatever the P
 - for a figure intent, an **answer shape** (money, percent, ratio, age, interval, quantity, rate, organisation), named patterns defined in `bench/verify.py`. Templates never hold raw regex;
 - example questions with `{subject}`.
 
-**Sections are categorised by code, by themselves.** A template applies to a section when its signal words are dense enough there, and, for statistics, when the section is dense with numbers. A book can mix topics, so each section is categorised on its own. You can override this, and switch templates or single intents on and off for your data folder; these choices are stored in `data/topics.json`:
+**Sections are categorised by the orchestrator agent.** It reads a map of the PDF (each section's headings, size, opening lines, and code's count of each template's signal words) and, when it fits the model's budget, the full text, and says which templates each section answers. A book can mix topics, so each section is categorised on its own. A section it leaves out, or an unreadable answer, falls back to code's density rules (signal words per 1,000 words; numbers per word for statistics). You can override this, and switch templates or single intents on and off for your data folder; these choices are stored in `data/topics.json`:
 
 ```
 uv run bench templates list                          # each template, its intents, and the sections it applies to
-uv run bench templates assign <section or pdf> animal_care,govt_scheme   # or: none, auto
+uv run bench templates assign <section or pdf> animal_care,govt_scheme   # or: none; auto (the orchestrator decides)
 uv run bench templates off animal_care symptoms      # on/off for a template or one intent
-uv run bench templates run                           # facts and questions aimed at each section's intents (--doc, --force)
+uv run bench templates run                           # per PDF: the orchestrator plans, workers write (--doc, --force)
 uv run bench templates coverage                      # data/coverage.md: which intents each section states and covers
 uv run bench check templates                         # the files and data/topics.json are valid
 ```
 
 The coverage report needs no LLM. An intent is *stated* in a section when its cue words occur there. A fact speaks to an intent when a cue is in its quote or in the heading line just above it, and, for figure intents, the quote holds an answer of the intent's shape. Each (section, intent) is marked covered (a kept question), facts only, stated but missing, or not stated.
 
-**Template questions** (`bench templates run`, part of `bench run` unless `--no-templates`) are written alongside the general ones. In each part of a section where a switched-on intent's cue words occur (other parts cost no call), an intent planner picks topics, each an intent and its subject (e.g. a disease, a scheme, a measure). The fact extractor and reviewer write and review one fact per topic; a table row can be a fact. The regex audit adds three rules to the fact rules: a cue word in the quote, its table header, the heading line above or its TOC headings; a figure intent's answer shape; and the subject named in the quote, its headings or the document title. Questions are written in the template's `styles` (question types, `direct` and `paraphrased` by default), with the intent's example question as a guide, and must also name their subject and differ from every general question. They are scored in their own report section (`Topic templates`, per intent), so the general headline stays comparable. Output: `data/templates.jsonl`; ids `<section>:tf01` (facts) and `<section>:t01` (questions).
+**Template questions** (`bench templates run`, part of `bench run` unless `--no-templates`) are written alongside the general ones, planned per PDF by an **orchestrator** agent and written by **worker** agents with fixed, versioned prompts (`bench/orchestrator.py`):
+1. **Categorise.** The orchestrator decides which templates each section answers (above).
+2. **Read.** A reader per ~12,000-character part lists every (intent, subject, paragraphs, short detail) the part states. Code drops an entry the audit could never pass: its subject not named near it, or no cue word of its intent in the text the audit reads.
+3. **Plan.** The orchestrator sees every entry of the PDF (and the full text, when it fits). It keeps the entries worth a fact, gives each subject one name across the document (e.g. "Foot and Mouth Disease (FMD)"), and writes a brief where a worker needs what its passage doesn't show. An unreadable plan falls back to every entry.
+4. **Write.** An extractor per pick points at sentences, and code cuts the quote; a table row can be a fact. Writers in the template's `styles` (`direct` and `paraphrased` by default) write the questions. A question the audit rejects goes back to its writer **once**, told why; the audit judges the new one.
+
+The regex audit alone decides what is kept. It adds three rules to the fact rules:
+- a cue word in the quote, its table header, the heading line above, its pages' TOC headings, or the 600 characters before it;
+- a figure intent's answer shape;
+- the subject named near the quote, its headings or the document title.
+
+Template questions must also name their subject and differ from every general question. They are scored in their own report section (`Topic templates`, per intent), so the general headline stays comparable. What the stage spent and kept is in `stats.json` and the workbook's Plan sheet. That covers calls per kept question, entries dropped, picks, rejections and repairs by rule, and subject × intent cells covered. Output: `data/templates.jsonl`, one row per PDF; ids `<section>:tf01` (facts) and `<section>:t01` (questions).
 
 To add a document type, add a TOML file with the same fields; `bench check templates` reports any mistake.
 
@@ -142,7 +162,7 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 | `runs/<run>/` | each `bench evaluate`: the facts, questions, results and report it scored, `manifest.json` (code, models, test set, PDFs) and `stats.json` (audit rejections by rule, AI flags, scores) |
 | `cache/` | every LLM answer, keyed by model, settings, instructions, schema and prompt |
 | `topics.json`, `coverage.md` | your template overrides and switches; the template coverage report |
-| `templates.jsonl` | per section: template facts and questions (with template, intent and subject) and rejected ones |
+| `templates.jsonl` | per PDF: the orchestrator's categorisation, the readers' entries and its plan, the calls made, and the template facts and questions (with template, intent, subject and brief) and rejected ones |
 | `trace.jsonl` | every agent call: role, prompt, output, tokens, seconds |
 | `bench.xlsx` | all of the above as readable sheets (`bench export`) |
 
@@ -150,6 +170,7 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 
 ```
 bench/      cli.py · config.py · llm.py · pdf.py · segments.py · facts.py · questions.py · verify.py · testbed.py · evaluate.py
+            templates.py (topic templates and their audit) · orchestrator.py (bench templates run)
             checks.py (bench check) · export.py (bench export) · serve.py (bench serve)
 tests/      offline tests (no LLM or Qdrant needed): uv run pytest
 postman/    the Postman collection

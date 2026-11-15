@@ -23,10 +23,11 @@ from typing import Any
 from bench import llm
 from bench.config import DATA_DIR, ROOT, BenchError, question_types, settings
 from bench.facts import FACTS
+from bench.orchestrator import generation_stats
 from bench.pdf import PAGES, read_jsonl, write_jsonl, write_text
 from bench.questions import QUESTIONS, QUESTIONS_VERSION
 from bench.templates import ROWS as TEMPLATE_ROWS
-from bench.templates import current_questions
+from bench.templates import current_questions, pdf_rows
 from bench.testbed import (
     CHUNK_CHARS,
     COLLECTION,
@@ -163,12 +164,14 @@ def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]
     for path in (FACTS, QUESTIONS, TEMPLATE_ROWS, RESULTS, REPORT):
         if path.exists():
             shutil.copy2(path, folder / path.name)
-    pages = read_jsonl(PAGES)
+    pages, template_rows = read_jsonl(PAGES), pdf_rows()
     manifest = {
         "run": llm.RUN_ID, "time": datetime.now().isoformat(timespec="seconds"), "code": _git(),
         "test_set": test_set_id(questions), "questions": len(questions),
         "template_test_set": test_set_id(topical) if topical else None, "template_questions": len(topical),
         "question_models": sorted({row["model"] for row in question_rows}),
+        "template_models": sorted({row["model"] for row in template_rows}),
+        "template_settings": sorted({(row["concurrency"], row["orchestrator_text_chars"]) for row in template_rows}),  # (LLM_CONCURRENCY, ORCHESTRATOR_TEXT_CHARS)
         "test_bed": {"collection": COLLECTION, "embed_model": settings().embed_model, "chunk_chars": CHUNK_CHARS,
                      "ranked": RANKED},
         "pdfs": sorted({(p["file_name"], p["doc_id"]) for p in pages}),
@@ -176,14 +179,10 @@ def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]
     }
     write_text(folder / "manifest.json", json.dumps(manifest, indent=1, ensure_ascii=False))
     numbers = stats(read_jsonl(FACTS), question_rows, results)
-    if topical:
-        template_rows = read_jsonl(TEMPLATE_ROWS)
-        numbers["templates"] = {"facts": {"kept": sum(len(r["facts"]) for r in template_rows),
-                                          "rejected": dict(Counter(reason_group(x["reason"]) for r in template_rows for x in r["rejected_facts"]))},
-                                "questions": {"kept": len(topical),
-                                              "rejected": dict(Counter(reason_group(x["reason"]) for r in template_rows for x in r["rejected"]))},
-                                "retrieval": {"by_intent": with_intervals(summary(templated, "intent")),
-                                              "by_method": by_method(templated)}}
+    if template_rows:
+        numbers["templates"] = {"generation": generation_stats(template_rows, questions)}
+    if templated:
+        numbers["templates"]["retrieval"] = {"by_intent": with_intervals(summary(templated, "intent")), "by_method": by_method(templated)}
     write_text(folder / "stats.json", json.dumps(numbers, indent=1, ensure_ascii=False))
     return folder
 

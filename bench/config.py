@@ -26,7 +26,11 @@ OUTPUT_TOKENS = 4096  # cap on each LLM answer
 REQUEST_TIMEOUT = 300  # seconds: one deadline per LLM request, across the SDK's retries
 MAX_RETRIES = 2  # retries of a failed LLM request by the OpenAI SDK
 MAX_FAILURES = 3  # a stage stops after this many sections fail in a row (e.g. the endpoint is down)
-PROVIDERS = ("ollama", "gemma")
+# Per model, each overridable in .env: LLM calls at once (LLM_CONCURRENCY) and how much PDF text one orchestrator
+# call may read beside its map (ORCHESTRATOR_TEXT_CHARS; 0 = the map only). The 31B was probed on 2026-11-12:
+# 300,000 characters (67,663 tokens) in 15 s, and 8 calls at once 4.3x faster than one at a time.
+PROVIDERS = {"gemma": {"concurrency": 8, "orchestrator_text_chars": 300_000},  # self-hosted 31B, the primary model
+             "ollama": {"concurrency": 1, "orchestrator_text_chars": 0}}  # local 12B fallback: Ollama runs one call at a time
 
 
 class BenchError(Exception):
@@ -95,6 +99,8 @@ class Settings:
     ollama_url: str
     embed_model: str
     qdrant_url: str
+    concurrency: int = 1  # LLM calls at once
+    orchestrator_text_chars: int = 0  # PDF text one orchestrator call may read beside its map
 
 
 @lru_cache(maxsize=1)
@@ -103,7 +109,15 @@ def settings() -> Settings:
     env = os.environ.get
     provider = env("LLM_PROVIDER", "ollama")
     if provider not in PROVIDERS:
-        raise BenchError(f"LLM_PROVIDER must be one of {PROVIDERS}, got {provider!r}")
+        raise BenchError(f"LLM_PROVIDER must be one of {tuple(PROVIDERS)}, got {provider!r}")
+    profile = PROVIDERS[provider]
+    try:
+        concurrency = int(env("LLM_CONCURRENCY") or profile["concurrency"])
+        text_chars = int(env("ORCHESTRATOR_TEXT_CHARS") or profile["orchestrator_text_chars"])
+    except ValueError as exc:
+        raise BenchError(f"LLM_CONCURRENCY and ORCHESTRATOR_TEXT_CHARS must be whole numbers ({exc})") from exc
+    if concurrency < 1 or text_chars < 0:
+        raise BenchError("LLM_CONCURRENCY must be at least 1 and ORCHESTRATOR_TEXT_CHARS at least 0")
     ollama_url = env("OLLAMA_URL", "http://localhost:11434/v1")
     if provider == "ollama":
         url, key, model = ollama_url, "ollama", env("OLLAMA_MODEL", "gemma4:12b")  # Ollama ignores the key
@@ -119,4 +133,6 @@ def settings() -> Settings:
         ollama_url=ollama_url,
         embed_model=env("EMBED_MODEL", "bge-m3"),
         qdrant_url=env("QDRANT_URL", "http://127.0.0.1:6333"),
+        concurrency=concurrency,
+        orchestrator_text_chars=text_chars,
     )
