@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from functools import lru_cache
+from itertools import pairwise
 from typing import Any
 
 from bench.pdf import NUMBER as NUMERIC_TOKEN
@@ -62,7 +64,7 @@ def has_shape(names: list[str], text: str) -> bool:
     return any(SHAPES[n].search(text) for n in names)
 
 
-ID_TOKEN = re.compile(r"\b[dfqx]\d{1,3}(?:_\d+)?\b")  # the short ids agents see (d8, f3, x12, d8_1), case-sensitive
+ID_TOKEN = re.compile(r"\b[dfgipqx]\d{1,3}(?:_\d+)?\b")  # the short ids agents see (d8, f3, g7, p4, i2, d8_1), case-sensitive
 NUMBER = re.compile(r"\d|\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
                     r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|"
                     r"ninety|hundred|thousand|lakhs?|crores?|million|billion|dozen|half|twice|double)\b", re.I)
@@ -246,8 +248,32 @@ def content_words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in STOPWORDS}
 
 
-def _term(term: str) -> re.Pattern[str]:
-    return re.compile(rf"(?<!\w){re.escape(term.strip())}(?!\w)", re.I)
+@lru_cache(maxsize=4096)
+def name_pattern(name: str) -> re.Pattern[str]:
+    """A name in any case, singular or plural, its words apart by spaces or hyphens ('Aflatoxins' finds 'aflatoxin')."""
+    words = [re.escape(w[:-1] if w.endswith("s") and len(w) > 3 else w) + "(?:e?s)?" for w in re.findall(r"[\w.&'’]+", name)]
+    return re.compile(r"(?<!\w)" + r"[\s\-‐–]+".join(words) + r"(?!\w)", re.I)
+
+
+FUNCTION_WORDS = frozenset(["a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the", "to", "with"])
+
+
+@lru_cache(maxsize=2)
+def library_words(corpus: str) -> frozenset[str]:
+    """Every word of the library's text in lower case, and every two adjacent words joined ('Blue Tongue': bluetongue)."""
+    words = re.findall(r"[a-z]+", corpus.lower())
+    return frozenset(words) | frozenset(a + b for a, b in pairwise(words))
+
+
+def in_library(term: str, corpus: str) -> list[str]:
+    """The words of a term that the library uses, in any case, singular or plural; function words don't count.
+    A term is absent from the library only when this is empty ('sheep and lambs' is not: sheep is there)."""
+    words = library_words(corpus)
+
+    def forms(w: str) -> set[str]:
+        return {w, w + "s", w + "es", w.removesuffix("s"), w.removesuffix("es"), *([w[:-1] + "ves"] if w.endswith("f") else [])}  # calf: calves
+
+    return [w for w in re.findall(r"[a-z]+", term.lower()) if w not in FUNCTION_WORDS and forms(w) & words]
 
 
 def plain(text: str) -> str:
@@ -277,9 +303,9 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
     sources = [{n for n, quote in enumerate(quotes) if find(p, quote, whole=True)} for p in pieces]
     if rules.get("absent_term"):
         term = q.get("absent_term", "").strip()
-        if not term or not _term(term).search(q["question"]):
+        if not term or not name_pattern(term).search(q["question"]):
             return "the question doesn't name its absent term"
-        if corpus is not None and _term(term).search(corpus):
+        if corpus is not None and in_library(term, corpus):
             return f"\"{term}\" is in the library, so the question may be answerable"
     elif not pieces or not all(sources):
         return "answer not found in its facts' quotes"
@@ -309,8 +335,6 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
         asked, source = content_words(q["question"]), content_words(" ".join(quotes))
         if asked and len(asked & source) > rules["max_quote_words"] * len(asked):
             return "too many of the question's words come from the quote"
-    if rules.get("rewrites_source") and plain(q["question"]) == plain(q.get("source_question", "")):
-        return "the rewrite is the same as its source"
     return None
 
 

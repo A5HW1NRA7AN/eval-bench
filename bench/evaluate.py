@@ -23,9 +23,9 @@ from typing import Any
 from bench import llm
 from bench.config import DATA_DIR, ROOT, BenchError, question_types, settings
 from bench.facts import FACTS
-from bench.orchestrator import generation_stats
+from bench.orchestrator import generation_stats, question_stats
 from bench.pdf import PAGES, read_jsonl, write_jsonl, write_text
-from bench.questions import QUESTIONS, QUESTIONS_VERSION
+from bench.questions import QUESTIONS, question_rows
 from bench.templates import ROWS as TEMPLATE_ROWS
 from bench.templates import current_questions, pdf_rows
 from bench.testbed import (
@@ -179,6 +179,7 @@ def save_run(questions: list[dict[str, Any]], question_rows: list[dict[str, Any]
     }
     write_text(folder / "manifest.json", json.dumps(manifest, indent=1, ensure_ascii=False))
     numbers = stats(read_jsonl(FACTS), question_rows, results)
+    numbers["questions"]["generation"] = question_stats(question_rows)
     if template_rows:
         numbers["templates"] = {"generation": generation_stats(template_rows, questions)}
     if templated:
@@ -208,9 +209,7 @@ def unanswerable_lines(answerable: list[dict[str, Any]], unanswerable: list[dict
 
 
 def run_evaluate() -> None:
-    rows = read_jsonl(QUESTIONS)
-    if any(row["version"] != QUESTIONS_VERSION for row in rows):
-        raise BenchError(f"questions.jsonl has rows in an older format: run `bench questions` ({QUESTIONS_VERSION})")
+    rows = question_rows()  # rows in an older format are left out: `bench questions` redoes them
     general = [q for row in rows for q in row["questions"]]
     topical = current_questions()  # template questions, scored and reported apart from the general ones
     questions = general + topical

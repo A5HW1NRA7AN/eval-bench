@@ -1,0 +1,33 @@
+# Word lists for unanswerable questions (bench/questions.py). A fact that names a term of a list may be asked about
+# another term of the same list that the library never mentions: code keeps only terms none of whose words appear
+# anywhere in the library (any case, singular or plural), and the writer never picks its own. Each list needs common
+# terms (so a fact's list is recognised) as well as rarer ones (the candidates). Check edits with `bench check questions`.
+
+species = ["cattle", "cow", "bull", "calf", "heifer", "buffalo", "goat", "sheep", "pig", "camel", "horse", "donkey", "mule",
+           "poultry", "chicken", "duck", "rabbit", "yak", "mithun", "quail", "emu", "ostrich", "alpaca", "llama", "reindeer",
+           "bison", "deer", "guinea fowl"]
+
+countries = ["India", "Pakistan", "Bangladesh", "Nepal", "Bhutan", "Sri Lanka", "China", "Brazil", "United States", "Canada",
+             "Mexico", "Argentina", "Australia", "New Zealand", "Kenya", "Uganda", "Tanzania", "Nigeria", "Ethiopia", "Egypt",
+             "Netherlands", "Denmark", "Norway", "Germany", "France", "Ireland", "Russia", "Turkey", "Iran", "Indonesia",
+             "Vietnam", "Philippines", "Myanmar"]
+
+states = ["Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana",
+          "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya",
+          "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura",
+          "Uttar Pradesh", "Uttarakhand", "West Bengal", "Ladakh", "Lakshadweep", "Puducherry"]
+
+diseases = ["mastitis", "brucellosis", "anthrax", "theileriosis", "babesiosis", "rabies", "bluetongue", "foot and mouth disease",
+            "haemorrhagic septicaemia", "black quarter", "lumpy skin disease", "anaplasmosis", "trypanosomiasis",
+            "leptospirosis", "paratuberculosis", "tuberculosis", "ketosis", "milk fever", "bloat", "coccidiosis",
+            "salmonellosis", "listeriosis", "Q fever", "sheep pox", "goat pox", "camelpox", "schmallenberg"]
+
+fodders = ["berseem", "lucerne", "maize", "sorghum", "napier", "oats", "cowpea", "guinea grass", "stylo", "subabul", "azolla",
+           "moringa", "sugarcane", "bajra", "jowar", "ragi", "barley", "wheat straw", "paddy straw", "silage", "hay",
+           "groundnut cake", "cottonseed cake", "mustard cake", "soybean meal", "wheat bran", "rice bran", "teff", "sainfoin",
+           "chicory", "kale", "fodder beet"]
+
+breeds = ["Gir", "Sahiwal", "Red Sindhi", "Tharparkar", "Rathi", "Kankrej", "Ongole", "Hariana", "Deoni", "Holstein Friesian",
+          "Jersey", "Brown Swiss", "Murrah", "Mehsani", "Jaffarabadi", "Surti", "Nili Ravi", "Bhadawari", "Toda", "Banni",
+          "Pandharpuri", "Ayrshire", "Guernsey", "Simmental", "Montbeliarde", "Sannen", "Jamunapari", "Beetal", "Barbari",
+          "Sirohi", "Osmanabadi"]

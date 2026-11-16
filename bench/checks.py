@@ -15,9 +15,9 @@ from bench.evaluate import REPORT, RESULTS
 from bench.facts import FACTS, fact_budget
 from bench.facts import fingerprint as facts_fingerprint
 from bench.orchestrator import fingerprint as template_fingerprint
+from bench.orchestrator import material, question_fingerprint, question_units
 from bench.pdf import PAGES, read_jsonl
-from bench.questions import LIBRARY, QUESTIONS, library_fingerprint, split_types
-from bench.questions import fingerprint as questions_fingerprint
+from bench.questions import QUESTIONS, absent_terms, question_rows, vocab
 from bench.segments import INGEST, SEGMENTS
 from bench.templates import categorised, load_topics, pdf_rows, row_problems, templates
 from bench.templates import current_questions as current_template_questions
@@ -95,25 +95,26 @@ def check_facts() -> list[Check]:
 
 
 def check_questions() -> list[Check]:
-    """Questions: valid types, every row made from today's inputs, still pass the audit, evidence in place."""
+    """Questions: valid types, word lists and groups; every group's row made from today's inputs; kept questions still
+    pass the audit; evidence in place."""
     try:
-        types = question_types()
+        types, lists = question_types(), vocab()
     except BenchError as exc:
-        return [("question_types.toml is valid", False, str(exc))]
+        return [("question_types.toml and vocab.toml are valid", False, str(exc))]
     if not QUESTIONS.exists():
         return _missing(QUESTIONS, "questions")
-    segments = {s["segment_id"]: s for s in _rows(SEGMENTS)}
+    topics, segments = load_topics(), {s["segment_id"]: s for s in _rows(SEGMENTS)}
+    members = Counter(pdf for pdfs in topics["groups"].values() for pdf in pdfs)
+    bad_groups = sorted(pdf for pdf, n in members.items() if n > 1 or pdf not in {s["file_name"] for s in segments.values()})
     facts_rows = {r["segment_id"]: r for r in _rows(FACTS)}
     facts = {f["fact_id"]: f for r in facts_rows.values() for f in r["facts"]}
     corpus = "\n".join(p["text"] for p in _rows(PAGES))
-    rows = {r["segment_id"]: r for r in read_jsonl(QUESTIONS)}
-    section_types, library = split_types(types)
-    expected = {sid: questions_fingerprint(section_types, facts_rows.get(sid, {}).get("facts", []), s["title"])
-                for sid, s in segments.items() if s["use_for_questions"]}
-    if library:
-        expected[LIBRARY] = library_fingerprint(library, list(facts_rows.values()), {sid: s["title"] for sid, s in segments.items()})
-    stale = [sid for sid, fp in expected.items() if rows.get(sid, {}).get("fingerprint") != fp]
-    stale += [sid for sid in rows if sid not in expected]  # rows of sections that are gone, or a library row no type needs
+    absent, rows = absent_terms(lists, corpus), {r["group"]: r for r in question_rows()}
+    expected = {name: question_fingerprint(name, material(segs, facts_rows, lists, absent), types)
+                for name, segs in question_units(topics, list(segments.values()))}
+    stale = [name for name, fp in expected.items() if rows.get(name, {}).get("fingerprint") != fp]
+    stale += [name for name in rows if name not in expected]  # rows of groups that are gone
+    failed = {name: len(r["failed_calls"]) for name, r in rows.items() if r["failed_calls"]}
     failing, moved = [], []
     questions = [q for r in rows.values() for q in r["questions"]]
     for q in questions:
@@ -129,10 +130,13 @@ def check_questions() -> list[Check]:
     rejected = Counter(reason_group(x["reason"]) for r in rows.values() for x in r["rejected"])
     models = ", ".join(f"{m}: {n} rows" for m, n in Counter(r.get("model") for r in rows.values()).items()) or "no rows"
     return [
-        ("question_types.toml is valid", True, f"{len(types)} active types: {', '.join(types)}"),
-        ("every segment with facts has questions made from today's inputs", not stale,
-         f"{len(expected) - len([s for s in stale if s in expected])} of {len(expected)} rows current"
-         + (f"; stale or missing: {stale[:3]} (run `bench questions`)" if stale else "")),
+        ("question_types.toml and vocab.toml are valid", True, f"{len(types)} active types: {', '.join(types)}; {len(lists)} word lists"),
+        ("data/topics.json groups name known PDFs, each in one group at most", not bad_groups,
+         ", ".join(bad_groups[:3]) or f"{len(topics['groups'])} groups"),
+        ("every group of PDFs has questions made from today's inputs", not stale,
+         f"{len(expected) - len([n for n in stale if n in expected])} of {len(expected)} groups current"
+         + (f"; stale or missing: {stale[:3]} (run `bench questions`)" if stale else "")
+         + (f"; calls that failed (retried on the next run): {failed}" if failed else "")),
         ("every question still passes the audit", not failing,
          f"{len(questions)} questions {dict(counts)}, {flagged} flagged by the AI reviewer; models {models}"
          + (f"; failing: {failing[:3]}" if failing else "")),
@@ -167,7 +171,7 @@ def check_evaluate() -> list[Check]:
     if not RESULTS.exists():
         return _missing(RESULTS, "evaluate")
     scored = [r.get("uid") for r in read_jsonl(RESULTS)]
-    current = [q.get("uid") for r in _rows(QUESTIONS) for q in r["questions"]] + [q.get("uid") for q in current_template_questions()]
+    current = [q.get("uid") for r in question_rows() for q in r["questions"]] + [q.get("uid") for q in current_template_questions()]
     if None in scored or None in current:  # made before content ids: they can't be matched
         return [("every current question is scored", False, "questions or results have no content id: run `bench questions` "
                  "and `bench evaluate`")]

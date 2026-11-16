@@ -1,14 +1,16 @@
 # Question types. Each table is one type; adding or changing a type needs no code change.
 # The file is checked strictly (bench check questions): an unknown key, rule or source is an error.
+# The orchestrator (bench/orchestrator.py) plans which facts get which type, from candidates code builds; the type's
+# writer then writes exactly one question per planned item.
 #
 # enabled  false switches the type off: no LLM call, and its old questions are redone away (default true)
-# count    questions per section (for source "library": in total); 0 also switches the type off
-# source   what the type's writer agent reads:
-#            facts      the section's verified facts
-#            paragraph  the section's facts that span several sentences (sizes passage and paragraph)
-#            absent     the section's facts, to write a question the library can't answer
-#            question   the section's verified questions of the types in `from`, to rewrite
-#            library    every verified fact of every section, to link facts across sections
+# count    questions per section at most (for source "library": per PDF, by the pair's first fact); 0 also switches it off
+# source   what an item of the type is written from:
+#            facts      one verified fact of a section
+#            paragraph  one fact that spans several sentences (sizes passage and paragraph)
+#            absent     one fact, and a term the library never mentions that code picked from vocab.toml
+#            library    two facts from different sections: of one PDF, or of PDFs grouped in data/topics.json
+#          A type whose rules ask for 2 or more facts (and source facts) is written from two facts of one section.
 # prompt   what the writer is told this type is
 # review   what the question reviewer checks for this type (its verdicts are AI flags; the audit decides)
 # rules    checked by the regex audit (bench/verify.py):
@@ -16,15 +18,15 @@
 #            facts = [min, max]      distinct facts the question uses
 #            pieces = [min, max]     answer spans, joined by "; "
 #            span_per_fact = true    each fact gives at least one answer span
-#            needs_number = true     the answer holds a number, in digits or words
+#            needs_number = true     the answer holds a number, in digits or words (only facts with a number get it)
 #            max_quote_words = 0.5   at most this share of the question's content words come from its quotes
-#            sections = 2            the facts come from at least this many sections
-#            absent_term = true      the question names a term that appears nowhere in the library
-#            rewrites_source = true  the question differs from the question it rewrites
+#            sections = 2            the facts come from at least this many sections (goes with source "library")
+#            absent_term = true      the question names a term none of whose words appear in the library
 #            english_only = false    allow non-English questions (English only is the default for every type)
 # Every type also follows the general rules: its facts are verified, its answer spans are in their quotes,
 # it doesn't copy a quote or carry an internal id, and it names the year when its quote states a reporting
 # year (e.g. 2024-25).
+# The "noisy" type (Hinglish farmer typing) was cut while questions are English only (2026-11-15).
 
 [direct]
 count = 2
@@ -44,9 +46,9 @@ rules = { facts = [1, 1], max_quote_words = 0.5 }
 [keyword]
 count = 1
 source = "facts"
-prompt = "A 2-5 word search query, the way people type into a search box."
+prompt = "A 2-8 word search query, the way people type into a search box."
 review = "A short search query (not a full question) that the quote answers."
-rules = { words = [2, 5], facts = [1, 1] }
+rules = { words = [2, 8], facts = [1, 1] }
 
 [precise]
 count = 2
@@ -59,7 +61,8 @@ rules = { facts = [1, 1], needs_number = true }
 [multi_fact]
 count = 1
 source = "facts"
-prompt = "One natural question about a single topic whose full answer needs two different facts; list both ids."
+prompt = """One natural question about a single topic whose full answer needs both facts of the item; \
+the answer gives a span from each, joined by "; "."""
 review = "One question about a single topic; its answer needs both of its facts, and the two parts belong together."
 rules = { facts = [2, 3], pieces = [2, 3], span_per_fact = true }
 
@@ -75,27 +78,16 @@ rules = { facts = [1, 1], pieces = [2, 6] }
 [unanswerable]
 count = 1
 source = "absent"
-prompt = """A question a farmer could plausibly ask that this library can't answer: take a fact and change \
-one qualifier to something the documents never mention (another animal, product, disease, country or \
-scheme). Put that new word or phrase in absent_term, leave answer empty and list the fact you changed."""
+prompt = """A question a farmer could plausibly ask that this library can't answer: the item gives a fact and an \
+absent term, which the documents never mention, and the word it replaces. Ask the fact's question about the absent \
+term in place of that word, and name the absent term exactly. Leave answer empty."""
 review = "A plausible farmer question that its quotes do NOT answer, because of its absent_term."
 rules = { facts = [1, 1], absent_term = true }
-
-[noisy]
-enabled = false  # off: questions are English only for now (no Hinglish)
-count = 1
-source = "question"
-from = ["direct", "paraphrased", "precise"]
-prompt = """Rewrite a question the way a farmer types it into a phone chat: lower case, short, a typo or \
-two, maybe Hindi words in English letters (doodh, bhains, kitna, chara), little grammar. Keep every \
-qualifier the answer depends on."""
-rules = { words = [2, 15], rewrites_source = true, english_only = false }
 
 [multi_hop]
 count = 10
 source = "library"
-prompt = """One natural question whose answer needs facts from two different sections or documents (e.g. \
-a limit in one and a cause or remedy in another). List the ids of both facts; the answer has one span \
-from each."""
+prompt = """One natural question whose answer needs both facts of the item, which come from different sections or \
+documents (e.g. a limit in one and a cause or remedy in another); the answer has one span from each, joined by "; "."""
 review = "One question whose two parts are related and come from two different sections; both are needed."
 rules = { facts = [2, 3], pieces = [2, 3], span_per_fact = true, sections = 2 }

@@ -181,12 +181,12 @@ def test_a_rejected_question_is_repaired_once_with_the_reason_but_never_to_diffe
 def test_a_pdf_with_failed_calls_is_redone_and_rows_of_pdfs_that_are_gone_are_dropped(monkeypatch):
     monkeypatch.setattr(orchestrator, "load_segments", lambda: [_segment()])
     done = {"book.pdf": {"fingerprint": "fp", "failed_calls": ["book-01 animal_care part 1/1"]}, "gone.pdf": {}}
-    assert [segs[0]["file_name"] for segs in orchestrator.todo(done, None, False, lambda segs: "fp", lambda row, segs: True)] == ["book.pdf"]
+    assert [name for name, _ in orchestrator.todo(done, None, False, lambda name, segs: "fp", lambda row, segs: True)] == ["book.pdf"]
     assert list(done) == ["book.pdf"]
     done["book.pdf"]["failed_calls"] = []
-    assert orchestrator.todo(done, None, False, lambda segs: "fp", lambda row, segs: True) == []
+    assert orchestrator.todo(done, None, False, lambda name, segs: "fp", lambda row, segs: True) == []
     with pytest.raises(BenchError, match="matches no PDF"):
-        orchestrator.todo(done, "nothing-like-this", False, lambda segs: "fp", lambda row, segs: True)
+        orchestrator.todo(done, "nothing-like-this", False, lambda name, segs: "fp", lambda row, segs: True)
 
 
 def test_the_fingerprint_changes_with_the_inputs_and_only_then(monkeypatch):

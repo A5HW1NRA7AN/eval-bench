@@ -9,7 +9,7 @@ LLM agents read our PDFs, pull out facts and write questions about them. A regex
 ```
 pdfs/ ──segment──► segments: one per top-level entry of each PDF's table of contents
          ├──facts────► fact agent reads each segment in parts of a few pages ──regex audit──► facts.jsonl
-         ├──questions► question agent writes questions from verified facts   ──regex audit──► questions.jsonl
+         ├──questions► orchestrator plans, writers write from verified facts ──regex audit──► questions.jsonl
          ├──index────► test bed: segments chunked (≤1200 chars) → bge-m3 → local Qdrant
          └──evaluate─► each question searched; a hit = a chunk overlapping its verified quote → report.md
 ```
@@ -27,24 +27,28 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
    - The **extractor** sees each topic's paragraphs as numbered sentences. It writes a self-contained claim and points at the sentences that state it: one for a figure, usually the whole paragraph for an explanation. Code cuts the quote there, so it is never retyped.
    - The **reviewer** reads every fact with its quote and keeps it, fixes its claim or flags it, with a reason. A flag is an AI verdict: it is recorded and reported, but only the regex audit decides what is kept.
    - Each part carries its heading path, the end of the previous part and the facts found so far. The segment's fact limit is shared evenly across its parts: given a whole chapter at once, the model took all its facts from the first fifth.
-3. **questions**: one writer agent per question type writes questions from each section's verified facts. A question reviewer keeps, rewords or flags each one (flags are reported as AI verdicts), and the regex audit alone decides. Questions are English only for now. The types live in **`question_types.toml`** (count, source, prompt and audit rules), so adding a type needs no code:
-   - `direct`, `paraphrased` (other words), `keyword` (2–5 words), `precise` (a number with its qualifiers), `multi_fact` (two facts);
+3. **questions**: planned per PDF (or group of PDFs) by an **orchestrator** agent, so every draft is meant to pass (`bench/orchestrator.py`):
+   - **Candidates (code).** Which facts suit each type, read from the type's fields, and each section's quota per one-fact type; pairs of facts that share a specific word (one used by at most 5 facts of the group); and **absent terms**: words of the lists in **`vocab.toml`** (species, countries, states, diseases, fodders, breeds) none of whose words the library uses, in any case, singular or plural, or as two words ("Blue Tongue" rules out bluetongue).
+   - **Plan (orchestrator).** It fills each section's quota, at most two one-fact questions per fact (of different types) and two uses of an absent term per PDF. A pair gets a question only when its two facts serve one need, not two questions joined by "and"; an absent term only where the fact's answer depends on the word it replaces. Code checks every item. An unreadable plan, or a section it leaves out, is planned by code, which plans no pairs.
+   - **Write.** A writer per type writes one question per item; code attaches the item's facts and absent term. A question the audit rejects goes back to its writer **once**, told why. A reviewer keeps, rewords or flags each one (flags are AI verdicts), and the regex audit alone decides.
+   - **Judged on generation numbers, never on retrieval:** items planned (by type, and by the orchestrator or code), invalid items with why, unfilled items, repairs by rule, sections and facts used, absent terms, and multi-hop within or across PDFs, in `stats.json` and the workbook's Question plan sheet.
+
+   Questions are English only for now. The types live in **`question_types.toml`** (count, source, prompt and audit rules), so adding a type needs no code:
+   - `direct`, `paraphrased` (other words), `keyword` (2–8 words), `precise` (a number with its qualifiers), `multi_fact` (two facts of one section);
    - `comparison`: several answer parts from one paragraph-sized fact;
-   - `noisy`: a kept question retyped the way farmers type (switched off for now: questions are English only);
-   - `unanswerable`: a qualifier changed to something the library never mentions;
-   - `multi_hop`: facts from two sections or PDFs, written once for the whole library.
+   - `unanswerable`: a fact asked about an absent term in place of the word of its list (e.g. yak for cattle);
+   - `multi_hop`: two facts from different sections of one PDF, or of PDFs you group in `data/topics.json` (`"groups": {"dairy": ["a.pdf", "b.pdf"]}`); whether two PDFs belong together depends on the PDFs.
 4. **index**: every segment is cut into chunks without overlap or gaps, embedded with `bge-m3` and stored in Qdrant.
 5. **evaluate**: each question is embedded and searched. Gold chunks are the ones that overlap its evidence quote, so scoring needs no judging. The report shows hit@1/3/5/10 and MRR by question type, plus every miss with what came back instead.
 
 **The regex audit:**
 - **Facts:** the quote is cut by code from the sentence range the agent points at, so it is always the PDF's own text. The range must exist and be at most 1,200 characters. A table row is a sentence of its own: rows of values are kept with their table's header rows (cut by code and recorded with the fact), and bare numbers without headers are rejected. The claim can't start with a pronoun or have a value its quote lacks. Any date, year or acronym it names must appear in the section. A fact that overlaps a kept one by more than half is dropped.
 - **Questions:** each must refer to verified facts. Its answer is a single span, or several joined by `; `, and each span must appear in their quotes. No question may copy its quote, and a question whose quote states a reporting year (e.g. 2024-25) must name a year. Each type then has its own rules in `question_types.toml`, for example:
-  - keyword queries are 2–5 words;
+  - keyword queries are 2–8 words;
   - precise answers contain a number, in digits or as a number word (e.g. `four`, `twice`, `lakh`);
   - multi-fact and multi-hop questions take an answer span from each fact, and multi-hop facts come from two sections;
   - at most half of a paraphrase's content words may come from its quote;
-  - an unanswerable question names a term found nowhere in the library;
-  - a noisy question differs from the question it rewrites;
+  - an unanswerable question names its absent term, and no word of that term appears in the library ("sheep and lambs" fails if the library says sheep);
   - every question is plain English (no Indian script or romanized-Hindi words) and carries no internal id such as `d8_1`.
 - **Rejected items** are kept in the output with the reason. Every kept fact and question has a content id (`uid`), so results can't be matched to the wrong question after a re-run.
 
@@ -97,7 +101,7 @@ Import `postman/eval-bench.postman_collection.json` into Postman. It holds reque
 - every stage's output, through `bench serve`;
 - the local Ollama models.
 
-The `facts` and `questions` stages save after every segment (atomically, so a stop never corrupts a file). Each row carries a **fingerprint** of everything that made it (prompts, output schemas, question types, settings and the text or facts it was written from). A run skips rows whose fingerprint is current and redoes the rest, plus rows whose kept items no longer pass the audit, so editing a prompt or `question_types.toml` redoes exactly what it affects. The model is recorded but not fingerprinted: to regenerate with another model, use `--force`. A section that fails (e.g. the endpoint is down) is left to do while the stage carries on; after 3 failures in a row the stage stops, and a re-run resumes. Only one writing command runs at a time per `data/` folder. `evaluate` first checks the questions and test bed, and stops if a question's evidence no longer matches the indexed text.
+The `facts` stage saves after every segment, `questions` after every group of PDFs and `templates run` after every PDF (atomically, so a stop never corrupts a file). Each row carries a **fingerprint** of everything that made it (prompts, output schemas, question types, settings and the text or facts it was written from). A run skips rows whose fingerprint is current and redoes the rest, plus rows whose kept items no longer pass the audit, so editing a prompt or `question_types.toml` redoes exactly what it affects. The model is recorded but not fingerprinted: to regenerate with another model, use `--force`. A section that fails (e.g. the endpoint is down) is left to do while the stage carries on; after 3 failures in a row the stage stops, and a re-run resumes. Only one writing command runs at a time per `data/` folder. `evaluate` first checks the questions and test bed, and stops if a question's evidence no longer matches the indexed text.
 
 **Troubleshooting.** `✗ another bench command is writing data/`: wait for the other run. `N sections failed in a row`: the LLM endpoint is probably down (the remote Gemma 4 endpoint is up until about 9 pm IST); re-run later and it resumes. `Qdrant is not reachable`: `docker compose up -d`. `bench index` only rebuilds a local Qdrant.
 
@@ -114,7 +118,7 @@ Both are recorded on each row and in the run manifest; like the model, they aren
 
 ## Topic templates
 
-A template describes what users ask about one *kind* of document, whatever the PDF: `templates/animal_care.toml`, `templates/govt_scheme.toml` and `templates/statistical_report.toml`. Each lists **intents** (e.g. symptoms, vaccination schedule; eligibility, benefit; growth, share). Every intent has:
+A template describes what users ask about one *kind* of document, whatever the PDF: `templates/animal_care.toml`, `templates/govt_scheme.toml` and `templates/statistical_report.toml`; `templates/feeding.toml` (rations, minerals, fodder, water) is a draft, off until its intents are reviewed (`bench templates on feeding`). Each lists **intents** (e.g. symptoms, vaccination schedule; eligibility, benefit; growth, share). Every intent has:
 - plain **cue words**, matched at the start of a word ("vaccin" matches vaccine and vaccination);
 - for a figure intent, an **answer shape** (money, percent, ratio, age, interval, quantity, rate, organisation), named patterns defined in `bench/verify.py`. Templates never hold raw regex;
 - example questions with `{subject}`.
@@ -155,13 +159,13 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 | `ingest.jsonl` | per PDF: page statuses, tables, how the TOC was used (agreement, dropped titles), segment sizes |
 | `segments.jsonl` | segments with their text, page map and TOC headings |
 | `facts.jsonl` | per segment: verified facts (with position and pages) and rejected ones (with reasons) |
-| `questions.jsonl` | per segment: verified questions, each with its evidence (quotes and positions), and rejected ones |
+| `questions.jsonl` | per group of PDFs: the plan (every item, who planned it and what became of it; invalid items with why), verified questions with their evidence (quotes and positions), and rejected ones; ids `<section>:q01`, and `<first fact's section>:h01` for multi-hop |
 | `chunks.jsonl` | the test-bed chunks stored in Qdrant |
 | `results.jsonl`, `report.md` | per-question results (the top 100 chunks) and the scored report: per type, per document, and against two baselines (BM25 keyword search, and a hybrid of BM25 and embeddings by reciprocal rank fusion) |
 | `testset.json`, `testset.csv` | every current question with its answer and evidence (PDF, pages, verbatim quote, position) and stable ids; CSV cells are formula-safe |
 | `runs/<run>/` | each `bench evaluate`: the facts, questions, results and report it scored, `manifest.json` (code, models, test set, PDFs) and `stats.json` (audit rejections by rule, AI flags, scores) |
 | `cache/` | every LLM answer, keyed by model, settings, instructions, schema and prompt |
-| `topics.json`, `coverage.md` | your template overrides and switches; the template coverage report |
+| `topics.json`, `coverage.md` | your template overrides and switches, and groups of PDFs for multi-hop questions; the template coverage report |
 | `templates.jsonl` | per PDF: the orchestrator's categorisation, the readers' entries and its plan, the calls made, and the template facts and questions (with template, intent, subject and brief) and rejected ones |
 | `trace.jsonl` | every agent call: role, prompt, output, tokens, seconds |
 | `bench.xlsx` | all of the above as readable sheets (`bench export`) |
@@ -170,10 +174,11 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 
 ```
 bench/      cli.py · config.py · llm.py · pdf.py · segments.py · facts.py · questions.py · verify.py · testbed.py · evaluate.py
-            templates.py (topic templates and their audit) · orchestrator.py (bench templates run)
+            templates.py (topic templates and their audit) · orchestrator.py (bench questions, bench templates run)
             checks.py (bench check) · export.py (bench export) · serve.py (bench serve)
 tests/      offline tests (no LLM or Qdrant needed): uv run pytest
 postman/    the Postman collection
 question_types.toml   the question types: count, source, prompt and audit rules per type
+vocab.toml            word lists that absent terms for unanswerable questions come from
 templates/            topic templates: intents, cue words, answer shapes and examples per document type
 ```

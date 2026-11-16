@@ -18,7 +18,7 @@ from bench.evaluate import REPORT, RESULTS
 from bench.facts import FACTS
 from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl
-from bench.questions import QUESTIONS
+from bench.questions import question_rows
 from bench.segments import SEGMENTS, slug
 from bench.testbed import COLLECTION, embed, qdrant
 
@@ -27,7 +27,7 @@ ENDPOINTS = {
     "/segments?doc=": "segments without their text: title, pages, used for questions, size",
     "/segments/<segment_id>": "one segment with its text, page map and TOC headings",
     "/facts?doc=&segment=": "the fact agent's output per segment: verified facts and rejected ones with reasons",
-    "/questions?doc=&type=": "the question agent's output per segment: verified questions (with evidence) and rejected ones",
+    "/questions?doc=&segment=&type=": "the general questions per group of PDFs: the plan, verified questions (with evidence) and rejected ones",
     "/results?type=&misses=1": "each question's search result: rank of the first evidence chunk, hit@k, top 5",
     "/report": "the scored report (Markdown)",
     "/checks": "every stage check (same as `bench check`)",
@@ -67,12 +67,18 @@ def route(path: str, query: dict[str, str]) -> tuple[int, Any]:
         return 200, [{"segment_id": s["segment_id"], "title": s["title"], "pages": s["pages"],
                       "use_for_questions": s["use_for_questions"], "chars": len(s["text"]), "headings": len(s["headings"])}
                      for s in segments if _match(s["segment_id"], doc)]
-    if name in ("facts", "questions"):
-        rows = _load(FACTS if name == "facts" else QUESTIONS, name)
-        rows = [r for r in rows if _match(r["segment_id"], doc) and query.get("segment", r["segment_id"]) == r["segment_id"]]
-        if name == "questions" and "type" in query:
-            rows = [{**r, "questions": [q for q in r["questions"] if q["type"] == query["type"]]} for r in rows]
-        return 200, rows
+    if name == "facts":
+        return 200, [r for r in _load(FACTS, "facts") if _match(r["segment_id"], doc) and query.get("segment", r["segment_id"]) == r["segment_id"]]
+    if name == "questions":
+        if not (rows := question_rows()):
+            raise LookupError("data/questions.jsonl has no rows in today's format: run `bench questions` first")
+
+        def wanted(q: dict[str, Any]) -> bool:  # by type, and by section: its own or any of its evidence's
+            return query.get("type", q["type"]) == q["type"] and ("segment" not in query or query["segment"] in
+                                                                  {q.get("segment_id"), *(ev["segment_id"] for ev in q.get("evidence", []))})
+
+        return 200, [{**r, "questions": [q for q in r["questions"] if wanted(q)], "rejected": [x for x in r["rejected"] if wanted(x)]}
+                     for r in rows if any(_match(slug(pdf), doc) for pdf in r["pdfs"])]
     if name == "results":
         results = [r for r in _load(RESULTS, "evaluate") if _match(r["question_id"], doc)
                    and query.get("type", r["type"]) == r["type"]]

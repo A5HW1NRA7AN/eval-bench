@@ -88,7 +88,7 @@ def test_question_audit_rules():
     assert check({**ok, "answer": "good quality"}) == "the answer has no number"
     assert check({**ok, "answer": "2 kg"}) == "answer not found in its facts' quotes"
     assert check({**ok, "fact_ids": ["f9"]}) == "refers to a fact that isn't verified"
-    assert check({**ok, "type": "keyword", "question": "oil cake pregnant animals late pregnancy dose"}) == "needs 2-5 words, has 7"
+    assert check({**ok, "type": "keyword", "question": "oil cake for pregnant animals in late pregnancy daily dose"}) == "needs 2-8 words, has 10"
     assert check({**ok, "type": "multi_fact"}) == "needs 2-3 facts, uses 1"
     yearly = {"f4": {"fact_id": "stats-01:f01", "quote": "Milk production reached 247.87 million tonnes in 2024-25."}}
     asked = {"type": "precise", "fact_ids": ["f4"], "answer": "247.87 million tonnes"}
@@ -111,10 +111,12 @@ def test_question_audit_rules():
     assert check(absent, corpus="cows, buffaloes and calves") is None
     assert check(absent, corpus="Camel milk is rich in iron.") == '"camel" is in the library, so the question may be answerable'
     assert check({**absent, "absent_term": "yak"}) == "the question doesn't name its absent term"
-    noisy = {"type": "noisy", "question": "how much oil cake in late pregnancy?", "fact_ids": ["f1"], "answer": "1 kg",
-             "source_question": "How much oil cake in late pregnancy?"}
-    assert check(noisy) == "the rewrite is the same as its source"
-    assert check({**noisy, "question": "pregnent bhains ko kitna oil cake"}) is None  # noisy allows it (and is off)
+    herd = {**absent, "question": "How much oil cake should pregnant sheep and lambs get?", "absent_term": "sheep and lambs"}
+    assert check(herd, corpus="Sheep need shade.") == '"sheep and lambs" is in the library, so the question may be answerable'  # per word
+    assert check(herd, corpus="cows and calves") is None  # "and" is a function word: it doesn't count
+    yaks = {**absent, "question": "How much oil cake should pregnant yaks get?", "absent_term": "yak"}
+    assert check(yaks, corpus="cows and calves") is None and check(yaks, corpus="Yaks live high up.") is not None  # plurals
+    assert check({**ok, "question": "How much oil cake (g7) in late pregnancy?"}) == "question contains an internal id: g7"
 
 
 def test_english_only_internal_ids_years_and_whole_answer_pieces():

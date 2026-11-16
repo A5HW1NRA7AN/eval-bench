@@ -91,9 +91,9 @@ def facts(doc: str = DOC, max_facts: int = typer.Option(None, help=f"Facts per s
 @app.command()
 @_command(writes=True)
 def questions(doc: str = DOC, force: bool = FORCE) -> None:
-    """3. Write each question type in question_types.toml from the verified facts, keep those that pass the
-    audit -> data/questions.jsonl."""
-    from bench.questions import run_questions
+    """3. Per group of PDFs, the orchestrator plans which question type each verified fact (or pair of facts) gets;
+    writers write them and the audit keeps those that pass -> data/questions.jsonl."""
+    from bench.orchestrator import run_questions
 
     run_questions(doc=doc, force=force)
 
@@ -127,8 +127,7 @@ def run(no_templates: bool = typer.Option(False, "--no-templates", help="Skip th
     from bench.evaluate import run_evaluate
     from bench.export import run_export
     from bench.facts import run_facts
-    from bench.orchestrator import run_templates
-    from bench.questions import run_questions
+    from bench.orchestrator import run_questions, run_templates
     from bench.segments import run_segments
     from bench.testbed import run_index
 
@@ -267,7 +266,7 @@ def templates_coverage() -> None:
 
     from bench.facts import FACTS, load_rows
     from bench.pdf import write_text
-    from bench.questions import QUESTIONS
+    from bench.questions import question_rows
     from bench.segments import load_segments
     from bench.templates import (
         COVERAGE,
@@ -281,7 +280,7 @@ def templates_coverage() -> None:
     )
 
     tmpls, template_rows = templates(), pdf_rows()
-    rows = coverage(load_segments(), load_rows(FACTS), load_rows(QUESTIONS), tmpls, load_topics(), by_section(template_rows),
+    rows = coverage(load_segments(), load_rows(FACTS), by_section(question_rows()), tmpls, load_topics(), by_section(template_rows),
                     categorised(template_rows))
     write_text(COVERAGE, coverage_report(rows, tmpls))
     for name in tmpls:

@@ -24,7 +24,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from bench import facts as fact_stage
 from bench import questions as question_stage
 from bench.config import DATA_DIR, ROOT, BenchError, question_types
 from bench.pdf import PAGES, read_jsonl, write_text
@@ -35,6 +34,7 @@ from bench.verify import (
     data_row,
     has_shape,
     kept_fact_problem,
+    name_pattern,
     plain,
     question_problem,
 )
@@ -107,14 +107,16 @@ def cue_pattern(cues: list[str]) -> re.Pattern[str]:
 
 
 def load_topics() -> dict[str, Any]:
-    """data/topics.json: {"switches": {"template" or "template.intent": bool}, "sections": {segment_id: [templates]}}."""
+    """data/topics.json, your choices for this data folder: {"switches": {"template" or "template.intent": bool},
+    "sections": {segment_id: [templates]}, "groups": {name: [PDF file names]}} (PDFs whose facts multi-hop questions
+    may pair; a PDF in no group is paired only within itself)."""
     if not TOPICS.exists():
-        return {"switches": {}, "sections": {}}
+        return {"switches": {}, "sections": {}, "groups": {}}
     try:
         topics = json.loads(TOPICS.read_text())
     except ValueError as exc:
         raise BenchError(f"data/topics.json isn't valid JSON ({exc}); fix or delete it") from exc
-    return {"switches": topics.get("switches", {}), "sections": topics.get("sections", {})}
+    return {"switches": topics.get("switches", {}), "sections": topics.get("sections", {}), "groups": topics.get("groups", {})}
 
 
 def save_topics(topics: dict[str, Any]) -> None:
@@ -200,21 +202,15 @@ def subject_names(subject: str) -> list[str]:
     return [n for n in dict.fromkeys(names) if len(n) >= 2]
 
 
-def _name_pattern(name: str) -> re.Pattern[str]:
-    """A name in any case, singular or plural, its words apart by spaces or hyphens ('Aflatoxins' finds 'aflatoxin')."""
-    words = [re.escape(w[:-1] if w.endswith("s") and len(w) > 3 else w) + "(?:e?s)?" for w in re.findall(r"[\w.&'’]+", name)]
-    return re.compile(r"(?<!\w)" + r"[\s\-‐–]+".join(words) + r"(?!\w)", re.I)
-
-
 def mentions(subject: str, question: str) -> bool:
     """True if a question names its subject, whole or by one of its content words ('wool output' for 'wool
     production', 'calves' for 'health practices for calves'): a farmer words it their own way."""
-    return names(subject, question) or any(_name_pattern(w).search(question) for w in content_words(subject))
+    return names(subject, question) or any(name_pattern(w).search(question) for w in content_words(subject))
 
 
 def names(subject: str, text: str) -> bool:
     """True if the text names the subject (or the name or abbreviation inside it): any case, singular or plural."""
-    return any(_name_pattern(n).search(text) for n in subject_names(subject))
+    return any(name_pattern(n).search(text) for n in subject_names(subject))
 
 
 def coverage(segments: list[dict[str, Any]], facts_rows: dict[str, dict], question_rows: dict[str, dict],
@@ -324,7 +320,7 @@ def template_question_problem(q: dict[str, Any], facts: dict[str, dict], kinds: 
 def inputs() -> tuple[dict[str, Template], dict[str, Any], dict[str, dict], str, set[str]]:
     """(templates, topics, styles, the library's text, the general questions) that rows are made and audited with."""
     tmpls = templates()
-    general = {plain(q["question"]) for row in fact_stage.load_rows(question_stage.QUESTIONS).values() for q in row["questions"]}
+    general = {plain(q["question"]) for row in question_stage.question_rows() for q in row["questions"]}
     corpus = "\n".join(p["text"] for p in read_jsonl(PAGES)) if PAGES.exists() else ""  # only absent terms need it
     return tmpls, load_topics(), styles(tmpls), corpus, general
 
@@ -335,12 +331,14 @@ def pdf_rows() -> list[dict[str, Any]]:
 
 
 def by_section(rows: list[dict[str, Any]]) -> dict[str, dict[str, list[dict[str, Any]]]]:
-    """Each section's template facts and questions, kept and rejected, gathered from the PDF rows."""
+    """Each section's facts and questions, kept and rejected, gathered from rows that span several sections (template
+    rows per PDF, question rows per group); items with no single section (multi-hop questions) are left out."""
     out: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for r in rows:
         for field in ("facts", "questions", "rejected_facts", "rejected"):
-            for item in r[field]:
-                out.setdefault(item["segment_id"], {"facts": [], "questions": [], "rejected_facts": [], "rejected": []})[field].append(item)
+            for item in r.get(field, []):
+                if item.get("segment_id"):
+                    out.setdefault(item["segment_id"], {"facts": [], "questions": [], "rejected_facts": [], "rejected": []})[field].append(item)
     return out
 
 

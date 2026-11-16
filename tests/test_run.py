@@ -56,9 +56,11 @@ def _agents(messages, info):
     elif "TYPE: direct" in system and "DOCUMENT TYPE" in prompt:  # a template writer
         reply = {"questions": [{"question": "How can dairy farmers prevent mastitis in their cows?", "fact_ids": ["f1"],
                                 "answer": "A dry floor prevents hoof problems and mastitis", "absent_term": ""}]}
-    elif "TYPE: direct" in system and "whole library" not in prompt:
-        reply = {"questions": [{"question": "How soon after birth should a calf be fed colostrum?", "fact_ids": ["f1"],
-                                "answer": "within two hours of birth", "absent_term": ""}]}
+    elif system.startswith("You plan the general questions"):  # the orchestrator: a direct question for each fact
+        reply = {"items": [{"type": "direct", "ref": g, "absent_term": "", "brief": ""} for g in re.findall(r"^(g\d+) \|", prompt, re.MULTILINE)]}
+    elif "TYPE: direct" in system and "ITEMS:" in prompt:  # a general writer: one question per item
+        reply = {"questions": [{"item": i, "question": "How soon after birth should a calf be fed colostrum?", "answer": "within two hours of birth"}
+                               for i in re.findall(r"^- (i\d+):", prompt, re.MULTILINE)]}
     else:
         reply = {"questions": []}
     return ModelResponse(parts=[TextPart(json.dumps(reply))])
@@ -85,6 +87,10 @@ def test_bench_run_end_to_end(book):
     assert manifest["test_set"] in report and manifest["pdfs"][0][0] == "book.pdf" and len(scored["ranked"]) >= 1
     assert stats["questions"]["kept"] == {"direct": 1} and stats["retrieval"]["by_type"][0]["n"] == 1
     assert {p.name for p in run.iterdir()} >= {"facts.jsonl", "questions.jsonl", "results.jsonl", "report.md"}
+    (general,) = [json.loads(line) for line in (config.DATA_DIR / "questions.jsonl").read_text().splitlines()]  # one row per group
+    assert general["group"] == "book.pdf" and general["pdfs"] == ["book.pdf"] and general["failed_calls"] == []
+    assert [(it["id"], it["type"], it["by"], it["outcome"]) for it in general["plan"]["items"]] == [("i1", "direct", "orchestrator", "book-01:q01")]
+    assert stats["questions"]["generation"]["items_by"] == {"orchestrator": 1} and stats["questions"]["generation"]["facts_used"] == 1
 
     (row,) = [json.loads(line) for line in (config.DATA_DIR / "templates.jsonl").read_text().splitlines()]  # one row per PDF
     assert row["sections"] == {"book-01": {"templates": ["animal_care"], "by": "orchestrator"}}
@@ -94,7 +100,7 @@ def test_bench_run_end_to_end(book):
     assert row["failed_calls"] == [] and row["calls"]["orchestrator plan"] == 1
     generation = stats["templates"]["generation"]
     assert generation["questions"]["kept"] == 1 and generation["picks"] == {"orchestrator": 1} and generation["cells"] == 1
-    assert "Plan" in load_workbook(config.DATA_DIR / "bench.xlsx").sheetnames
+    assert {"Plan", "Question plan"} <= set(load_workbook(config.DATA_DIR / "bench.xlsx").sheetnames)
     assert "## Topic templates" in report and "| animal_care.prevention | 1 |" in report
     assert "## Baselines" in report and "| keyword search (BM25) | 1 |" in report
     assert CliRunner().invoke(cli.app, ["testset"]).exit_code == 0

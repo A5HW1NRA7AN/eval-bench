@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from bench import checks, facts, serve
+from bench import checks, facts, questions, serve
+from bench.pdf import write_jsonl
 
 TEXT = "Give the calf colostrum within two hours of birth."
 
@@ -63,6 +64,15 @@ def test_api_routes(tmp_path, monkeypatch):
     assert serve.route("/segments/book-99", {})[0] == 404 and serve.route("/nope", {})[0] == 404
     with pytest.raises(LookupError):  # the server answers 404: run `bench facts` first
         serve.route("/facts", {})
+    with pytest.raises(LookupError):  # no rows in today's format yet
+        serve.route("/questions", {})
+    direct = {"question_id": "book-01:q01", "segment_id": "book-01", "type": "direct", "evidence": [{"segment_id": "book-01"}]}
+    hop = {"question_id": "book-01:h01", "type": "multi_hop", "evidence": [{"segment_id": "book-01"}, {"segment_id": "book-02"}]}
+    write_jsonl(questions.QUESTIONS, [{"group": "book.pdf", "pdfs": ["book.pdf"], "version": questions.QUESTIONS_VERSION,
+                                       "questions": [direct, hop], "rejected": []}, {"segment_id": "old-01", "questions": []}])
+    (row,) = serve.route("/questions", {"doc": "book", "segment": "book-02"})[1]  # a multi-hop question by its evidence
+    assert [q["question_id"] for q in row["questions"]] == ["book-01:h01"] and serve.route("/questions", {"doc": "other"})[1] == []
+    assert [q["question_id"] for q in serve.route("/questions", {"type": "direct"})[1][0]["questions"]] == ["book-01:q01"]
 
 
 def test_agent_calls_are_traced_and_the_workbook_has_every_sheet(tmp_path, monkeypatch):
@@ -92,7 +102,7 @@ def test_agent_calls_are_traced_and_the_workbook_has_every_sheet(tmp_path, monke
     paths = _data(tmp_path, monkeypatch, fact_start=TEXT.index("colostrum"))
     for name in ("SEGMENTS", "FACTS", "PAGES"):
         monkeypatch.setattr(export, name, paths[name])
-    for name, path in {"QUESTIONS": "q.jsonl", "RESULTS": "r.jsonl", "CHUNKS": "c.jsonl", "WORKBOOK": "bench.xlsx"}.items():
+    for name, path in {"RESULTS": "r.jsonl", "CHUNKS": "c.jsonl", "WORKBOOK": "bench.xlsx"}.items():
         monkeypatch.setattr(export, name, tmp_path / path)
     monkeypatch.setattr(export, "TRACE", llm.TRACE)
     book = load_workbook(export.run_export())

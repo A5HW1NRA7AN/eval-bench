@@ -49,24 +49,22 @@ class Rules(BaseModel):
     max_quote_words: float | None = None  # share of the question's content words that may come from its quotes
     sections: int | None = None  # facts from at least this many sections
     absent_term: bool = False  # names a term found nowhere in the library
-    rewrites_source: bool = False  # differs from the question it rewrites
     english_only: bool = True  # no Indian-script or romanized-Hindi words (on for every type unless set false)
 
 
 class QuestionType(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid")
     enabled: bool = True
     count: int = Field(ge=0)
-    source: Literal["facts", "paragraph", "absent", "question", "library"]
+    source: Literal["facts", "paragraph", "absent", "library"]
     prompt: str = Field(min_length=1)
     review: str = ""  # what the question reviewer checks for this type
     rules: Rules = Rules()
-    from_: list[str] = Field(default=[], alias="from")  # source "question": the types it rewrites
 
     @model_validator(mode="after")
-    def _from_needed(self) -> QuestionType:
-        if self.source == "question" and not self.from_:
-            raise ValueError("source 'question' needs `from`: a list of other types")
+    def _library(self) -> QuestionType:
+        if (self.source == "library") != ((self.rules.sections or 1) >= 2):
+            raise ValueError("source 'library' and rules.sections >= 2 go together: facts from several sections")
         return self
 
 
@@ -84,9 +82,7 @@ def question_types(path: Path = QUESTION_TYPES, active_only: bool = True) -> dic
         except ValidationError as exc:
             problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'type'}: {e['msg']}" for e in exc.errors())
             raise BenchError(f"{path.name}: [{name}] {problems}") from exc
-        if unknown := set(t.from_) - set(raw) | ({name} & set(t.from_)):
-            raise BenchError(f"{path.name}: [{name}] `from` names no other type: {', '.join(sorted(unknown))}")
-        types[name] = {**t.model_dump(by_alias=True, exclude={"rules"}), "rules": t.rules.model_dump(exclude_none=True)}
+        types[name] = {**t.model_dump(exclude={"rules"}), "rules": t.rules.model_dump(exclude_none=True)}
     return {n: t for n, t in types.items() if t["enabled"] and t["count"] > 0} if active_only else types
 
 

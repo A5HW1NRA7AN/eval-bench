@@ -158,7 +158,7 @@ def test_cli_assigns_switches_and_checks(isolated, monkeypatch):
     assert runner.invoke(cli.app, ["templates", "assign", "dairy-05", "animal_care"]).exit_code == 0
     assert runner.invoke(cli.app, ["templates", "off", "animal_care", "symptoms"]).exit_code == 0
     topics = json.loads(templates.TOPICS.read_text())
-    assert topics == {"sections": {"dairy-05": ["animal_care"]}, "switches": {"animal_care.symptoms": False}}
+    assert topics == {"sections": {"dairy-05": ["animal_care"]}, "switches": {"animal_care.symptoms": False}, "groups": {}}
     result = runner.invoke(cli.app, ["templates", "assign", "dairy-05", "no_such_template"])
     assert result.exit_code == 1 and "unknown template" in result.output
     assert runner.invoke(cli.app, ["templates", "assign", "dairy-05", "auto"]).exit_code == 0

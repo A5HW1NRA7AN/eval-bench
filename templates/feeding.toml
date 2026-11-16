@@ -1,0 +1,42 @@
+# Feeding and nutrition: what to feed an animal, how much, and how to grow, conserve and store feed.
+# Drafted 2026-11-15 and switched off until the team reviews the intents and cue words; `bench templates on feeding`
+# switches it on for this data folder. Cues are plain words matched at the start of a word; shapes are named answer
+# patterns (bench/verify.py). Check edits with `bench check templates`.
+enabled = false
+description = "A feeding or nutrition chapter, booklet or advisory: what to feed an animal, how much, and how to grow, conserve and store feed."
+subject = "the animal, stage or feed, e.g. a milking buffalo, a pregnant cow, maize silage"
+signals = ["feed", "fodder", "ration", "concentrate", "silage", "hay", "mineral mixture", "dry matter", "protein", "nutrient"]
+min_density = 8  # signal words per 1,000 words for the density rule (the orchestrator's hint and fallback)
+
+[intents.ration_by_stage]
+kind = "figure"
+description = "How much feed, fodder or concentrate an animal at a given stage needs per day."
+cues = ["ration", "concentrate", "fodder", "feed", "per day"]
+shape = ["rate", "quantity"]
+examples = ["How much concentrate should I give {subject} every day?"]
+
+[intents.mineral_supplement]
+kind = "figure"
+description = "Which minerals, vitamins or salt to give, and how much."
+cues = ["mineral", "salt", "calcium", "phosphorus", "vitamin", "supplement"]
+shape = ["rate", "quantity"]
+examples = ["How much mineral mixture should {subject} get each day?"]
+
+[intents.fodder_conservation]
+kind = "explanation"
+description = "How to make and store silage or hay, and how to tell it is good."
+cues = ["silage", "hay", "ensil", "conserv", "chaff", "storage"]
+examples = ["How do I make good silage from {subject}?"]
+
+[intents.green_and_dry_fodder]
+kind = "explanation"
+description = "Which green or dry fodders to grow or feed, their yield or feeding value, and when to cut them."
+cues = ["green fodder", "dry fodder", "berseem", "maize", "sorghum", "napier", "lucerne", "cowpea", "straw", "stover"]
+examples = ["Which green fodder is best for {subject}?"]
+
+[intents.water]
+kind = "figure"
+description = "How much water an animal needs, and when to give it."
+cues = ["water", "drink"]
+shape = ["rate", "quantity"]
+examples = ["How much water does {subject} need in summer?"]
