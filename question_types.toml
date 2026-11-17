@@ -26,7 +26,6 @@
 # Every type also follows the general rules: its facts are verified, its answer spans are in their quotes,
 # it doesn't copy a quote or carry an internal id, and it names the year when its quote states a reporting
 # year (e.g. 2024-25).
-# The "noisy" type (Hinglish farmer typing) was cut while questions are English only (2026-11-15).
 
 [direct]
 count = 2

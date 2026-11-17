@@ -8,10 +8,11 @@ LLM agents read our PDFs, pull out facts and write questions about them. A regex
 
 ```
 pdfs/ ──segment──► segments: one per top-level entry of each PDF's table of contents
-         ├──facts────► fact agent reads each segment in parts of a few pages ──regex audit──► facts.jsonl
-         ├──questions► orchestrator plans, writers write from verified facts ──regex audit──► questions.jsonl
-         ├──index────► test bed: segments chunked (≤1200 chars) → bge-m3 → local Qdrant
-         └──evaluate─► each question searched; a hit = a chunk overlapping its verified quote → report.md
+         ├──facts──────────► planner, extractor and reviewer agents per segment ──regex audit──► facts.jsonl
+         ├──questions──────► orchestrator plans, writers write from verified facts ─regex audit──► questions.jsonl
+         ├──templates run──► orchestrator plans per PDF, workers write template facts and questions ──► templates.jsonl
+         ├──index──────────► test bed: segments chunked (≤1200 chars) → bge-m3 → local Qdrant
+         └──evaluate───────► each question searched; a hit = a chunk overlapping its verified quote → report.md
 ```
 
 1. **segment**: page text comes from PyMuPDF's layout engine, in reading order, with tables written one row per line under their headers. Running headers, page numbers, stray glyphs and junk OCR pages are removed, and every page gets a status (text, image only, garbled, broken font, blank). An agent reads each PDF's printed table of contents. Its entries are checked against the TOC text and kept in the TOC's order, then located in the body to find the page offset. An entry printed without a page number starts at the page where its title stands as a heading, or is dropped if there is none. Each top-level entry becomes a segment (one longer than 30,000 characters is cut at its sections), and every page belongs to exactly one segment. Junk OCR pages are left out of the text. Not used for questions, though still indexed:
@@ -39,7 +40,7 @@ pdfs/ ──segment──► segments: one per top-level entry of each PDF's tab
    - `unanswerable`: a fact asked about an absent term in place of the word of its list (e.g. yak for cattle);
    - `multi_hop`: two facts from different sections of one PDF, or of PDFs you group in `data/topics.json` (`"groups": {"dairy": ["a.pdf", "b.pdf"]}`); whether two PDFs belong together depends on the PDFs.
 4. **index**: every segment is cut into chunks without overlap or gaps, embedded with `bge-m3` and stored in Qdrant.
-5. **evaluate**: each question is embedded and searched. Gold chunks are the ones that overlap its evidence quote, so scoring needs no judging. The report shows hit@1/3/5/10 and MRR by question type, plus every miss with what came back instead.
+5. **evaluate**: each question is embedded and searched. Gold chunks are the ones that overlap its evidence quote, so scoring needs no judging. The report shows hit@1/3/5/10 and the reciprocal rank (rr, over the top 100) by question type and by PDF, strict and lenient scores, dev and held-out, two baselines, the unanswerable questions, the template questions per intent, and every miss with what came back instead.
 
 **The regex audit:**
 - **Facts:** the quote is cut by code from the sentence range the agent points at, so it is always the PDF's own text. The range must exist and be at most 1,200 characters. A table row is a sentence of its own: rows of values are kept with their table's header rows (cut by code and recorded with the fact), and bare numbers without headers are rejected. The claim can't start with a pronoun or have a value its quote lacks. Any date, year or acronym it names must appear in the section. A fact that overlaps a kept one by more than half is dropped.
@@ -71,7 +72,7 @@ Put the PDFs in `pdfs/`.
 The entry point is the `bench` command (`bench/cli.py`; `python -m bench` works too). `bench run` runs every stage in order and checks each stage's output before the next one starts:
 
 ```
-uv run bench run              # segment → facts → questions → index → evaluate, with checks
+uv run bench run              # segment → facts → questions → templates run → index → evaluate → export, with checks
 ```
 
 Or one stage at a time:
@@ -80,6 +81,7 @@ Or one stage at a time:
 uv run bench segment          # new or removed PDFs are picked up; --refresh re-reads them all
 uv run bench facts            # one fact per 3,000 characters (3-15 per segment); --max-facts N, --doc <part of a file name>, --force
 uv run bench questions        # --doc, --force; types and counts in question_types.toml
+uv run bench templates run    # template facts and questions (see Topic templates); --doc, --force
 uv run bench index
 uv run bench evaluate
 ```
@@ -90,18 +92,15 @@ uv run bench evaluate
 uv run bench check            # checks every stage's saved output without the LLM (or: bench check facts)
 uv run bench export           # every stage, the scores and the agent calls in one workbook: data/bench.xlsx
 uv run bench testset          # the test set to hand over: data/testset.json and data/testset.csv
-uv run bench serve            # a read-only JSON API over every stage's output on http://127.0.0.1:8000
+uv run --extra ui bench ui    # every stage's output in a browser, and every command (see Web UI and workspaces)
 uv run bench --verbose facts  # any stage, also printing each agent's prompt and answer
 ```
 
 Every agent call is shown live in the terminal: what it worked on, what it returned, its time and tokens. Each audit verdict is shown too, with the reason for every rejection. Every call is also saved to `data/trace.jsonl`, and its answer is cached in `data/cache/`, so a re-run (or a run after a change) only asks the model what it hasn't been asked before. `bench --no-cache <stage>` asks again.
 
-Import `postman/eval-bench.postman_collection.json` into Postman. It holds requests for three things:
-- the local Qdrant: browse chunks, filter by PDF or segment, and run a two-step semantic search;
-- every stage's output, through `bench serve`;
-- the local Ollama models.
+Import `postman/eval-bench.postman_collection.json` into Postman to look at the local services directly: the Qdrant test bed (browse chunks, filter by PDF or segment, run a two-step semantic search) and the Ollama models.
 
-The `facts` stage saves after every segment, `questions` after every group of PDFs and `templates run` after every PDF (atomically, so a stop never corrupts a file). Each row carries a **fingerprint** of everything that made it (prompts, output schemas, question types, settings and the text or facts it was written from). A run skips rows whose fingerprint is current and redoes the rest, plus rows whose kept items no longer pass the audit, so editing a prompt or `question_types.toml` redoes exactly what it affects. The model is recorded but not fingerprinted: to regenerate with another model, use `--force`. A section that fails (e.g. the endpoint is down) is left to do while the stage carries on; after 3 failures in a row the stage stops, and a re-run resumes. Only one writing command runs at a time per `data/` folder. `evaluate` first checks the questions and test bed, and stops if a question's evidence no longer matches the indexed text.
+The `facts` stage saves after every segment, `questions` after every group of PDFs and `templates run` after every PDF (atomically, so a stop never corrupts a file). Each row carries a **fingerprint** of everything that made it (prompts, output schemas, question types, settings and the text or facts it was written from). A run skips rows whose fingerprint is current and redoes the rest, plus rows whose kept items no longer pass the audit, so editing a prompt or `question_types.toml` redoes exactly what it affects. The model is recorded but not fingerprinted: to regenerate with another model, use `--force`. A section that fails (e.g. the endpoint is down) is left to do while the stage carries on; after 3 failures in a row the stage stops, and a re-run resumes. Only one writing command runs at a time per `data/` folder. `evaluate` first checks the questions, the template questions and the test bed, and stops if a question's evidence no longer matches the indexed text.
 
 **Troubleshooting.** `✗ another bench command is writing data/`: wait for the other run. `N sections failed in a row`: the LLM endpoint is probably down (the remote Gemma 4 endpoint is up until about 9 pm IST); re-run later and it resumes. `Qdrant is not reachable`: `docker compose up -d`. `bench index` only rebuilds a local Qdrant.
 
@@ -112,9 +111,18 @@ The `facts` stage saves after every segment, `questions` after every group of PD
 | Setting | gemma (31B) | ollama (12B) |
 |---|---|---|
 | `LLM_CONCURRENCY`: LLM calls at once (the template stage runs each step's calls together) | 8 | 1 |
-| `ORCHESTRATOR_TEXT_CHARS`: how much PDF text the orchestrator may read beside its map | 300,000 | 0 (the map only) |
+| `ORCHESTRATOR_TEXT_CHARS`: how much PDF text the template orchestrator may read beside its map (the general question planner sees facts only) | 300,000 | 0 (the map only) |
 
-Both are recorded on each row and in the run manifest; like the model, they aren't fingerprinted, so switching models doesn't redo finished rows (`--force` does). Ollama's context length must be at least 32K: set it in Ollama.app or with `OLLAMA_CONTEXT_LENGTH`, because its `/v1` API can't set it per request.
+The model and `LLM_CONCURRENCY` are recorded on every row (`ORCHESTRATOR_TEXT_CHARS` on template rows) and in the run manifest; like the model, they aren't fingerprinted, so switching models doesn't redo finished rows (`--force` does). Ollama's context length must be at least 32K: set it in Ollama.app or with `OLLAMA_CONTEXT_LENGTH`, because its `/v1` API can't set it per request.
+
+## Scoring other systems, comparing runs
+
+- **Strict and lenient.** Strict, the headline, counts only the passage a question was written from. Lenient also counts any chunk in the library that holds the same quote, or an answer span of at least 5 words, verbatim (regex, no judging). It catches a fact restated word for word elsewhere, not the same fact in other words. The report shows both, per type.
+- **Dev and held-out.** One section in 5 is held out, with every question that touches it, so no dev question shares a passage with a held-out one; the split stays the same across runs. Tune a search system on dev and report held-out. Every result, and every question in `testset.json`, carries its `split`.
+- **`bench compare <run> [<run>|current]`** compares two kept runs (`data/runs/`) on the questions both scored, matched by content id. It reports the general questions (the headline) and the template questions apart, per type, with McNemar's p for each hit rate, and lists the questions one found and the other missed (`data/compare.md`). `bench compare list` lists the runs.
+- **`bench score results.jsonl`** scores another search system by the text it returned. Each line is `{"uid": ..., "passages": [text, ...]}`, best first, for the questions in `data/testset.json`. A passage counts when it holds the evidence quote (or a run of 10 of its words), compared word by word whatever the case, punctuation or table layout, and one of the answer's spans. Every answerable question is scored: one with no line is a miss.
+
+The UI has a Compare tab for both.
 
 ## Web UI and workspaces
 
@@ -125,14 +133,17 @@ uv run --extra ui bench ui    # http://127.0.0.1:8501 (Streamlit is an optional 
 The UI runs the whole project from a browser:
 - **Overview:** counts, every check, and the scored report.
 - **Pipeline:** each stage, or `run` for all of them, plus export, test set and coverage, with live logs and downloads.
-- **PDFs:** upload new PDFs.
+- **PDFs:** each PDF's pages and sections, a page's clean and raw text, and uploading new PDFs (best into a workspace: on main, a new PDF changes which terms the library never mentions, so every group's general questions are planned again).
 - **Explore:** a section's text with its facts, questions and rejections, and the selected question's evidence highlighted.
-- **Results:** each question's rank, and what the search returned instead.
+- **Results:** each question's rank, and what the search returned instead, by type, set and split.
 - **Search:** live embedding and BM25 search.
 - **Configure:** templates and intents on or off, a section's templates, and groups of PDFs for multi-hop.
-- **Agent calls:** the trace.
+- **Agent calls:** the latest calls, each with its prompt and output.
+- **Compare:** two kept runs side by side, and scoring another system's results file.
 
-The UI only reads `data/`. Every change runs as the matching `bench` command in the background, under the same lock, with its log in `data/ui/`. So the UI and the command line give the same rows, and neither can corrupt the other's run. Groups can also be set from the command line: `bench group <name> <pdf,pdf|none>`.
+The sidebar picks the workspace and the model, shows whether the 31B endpoint is up (it defaults to the 12B when it isn't) and what is running, with a Stop button that interrupts it as Ctrl-C would.
+
+The UI only reads `data/`. Every change runs as the matching `bench` command, under the same lock: stages in the background with their log in `data/ui/`, settings changes and scoring while you wait. So the UI and the command line give the same rows, and neither can corrupt the other's run. Groups can also be set from the command line: `bench group <name> <pdf,pdf|none>`.
 
 **Workspaces** keep separate sets of PDFs apart. `BENCH_WORKSPACE=<name>` (or the UI's sidebar) uses `workspaces/<name>/pdfs` and `workspaces/<name>/data`, and its own Qdrant collection `bench_docs_<name>`. Unset, the repo's `pdfs/`, `data/` and `bench_docs` are used as before. `question_types.toml`, `vocab.toml` and `templates/` are shared.
 
@@ -181,8 +192,10 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 | `facts.jsonl` | per segment: verified facts (with position and pages) and rejected ones (with reasons) |
 | `questions.jsonl` | per group of PDFs: the plan (every item, who planned it and what became of it; invalid items with why), verified questions with their evidence (quotes and positions), and rejected ones; ids `<section>:q01`, and `<first fact's section>:h01` for multi-hop |
 | `chunks.jsonl` | the test-bed chunks stored in Qdrant |
-| `results.jsonl`, `report.md` | per-question results (the top 100 chunks) and the scored report: per type, per document, and against two baselines (BM25 keyword search, and a hybrid of BM25 and embeddings by reciprocal rank fusion) |
-| `testset.json`, `testset.csv` | every current question with its answer and evidence (PDF, pages, verbatim quote, position) and stable ids; CSV cells are formula-safe |
+| `results.jsonl`, `report.md` | per-question results (the top 100 chunks, strict and lenient scores, split) and the scored report: per type, per document, strict and lenient, dev and held-out, and against two baselines (BM25 keyword search, and a hybrid of BM25 and embeddings by reciprocal rank fusion) |
+| `testset.json`, `testset.csv` | every current question with its answer, evidence (PDF, pages, verbatim quote, position), split and stable ids; CSV cells are formula-safe |
+| `compare.md`, `score-<file>.md` | the latest `bench compare`, and each `bench score` |
+| `ui/` | the UI's command logs, and results files uploaded for scoring |
 | `runs/<run>/` | each `bench evaluate`: the facts, questions, results and report it scored, `manifest.json` (code, models, test set, PDFs) and `stats.json` (audit rejections by rule, AI flags, scores) |
 | `cache/` | every LLM answer, keyed by model, settings, instructions, schema and prompt |
 | `topics.json`, `coverage.md` | your template overrides and switches, and groups of PDFs for multi-hop questions; the template coverage report |
@@ -190,14 +203,16 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 | `trace.jsonl` | every agent call: role, prompt, output, tokens, seconds |
 | `bench.xlsx` | all of the above as readable sheets (`bench export`) |
 
+A workspace keeps the same files in `workspaces/<name>/data/`.
+
 ## Layout
 
 ```
 bench/      cli.py · config.py · llm.py · pdf.py · segments.py · facts.py · questions.py · verify.py · testbed.py · evaluate.py
             templates.py (topic templates and their audit) · orchestrator.py (bench questions, bench templates run)
-            checks.py (bench check) · export.py (bench export) · serve.py (bench serve) · ui.py (bench ui)
+            checks.py (bench check) · export.py (bench export, bench testset) · ui.py (bench ui)
 tests/      offline tests (no LLM or Qdrant needed): uv run pytest
-postman/    the Postman collection
+postman/    a Postman collection for the local Qdrant and Ollama
 question_types.toml   the question types: count, source, prompt and audit rules per type
 vocab.toml            word lists that absent terms for unanswerable questions come from
 templates/            topic templates: intents, cue words, answer shapes and examples per document type

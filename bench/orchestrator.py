@@ -1,7 +1,7 @@
-"""The orchestrator: per PDF, an orchestrator agent plans the template facts and questions and worker agents write
-them. Code checks the plan and runs the workers, and the regex audit alone decides what is kept.
+"""The orchestrator: an orchestrator agent plans the questions and worker agents write them. Code builds what the plan
+chooses from, checks the plan, runs the workers and fills the plan's gaps; the regex audit alone decides what is kept.
 
-`bench templates run`, per PDF:
+`bench templates run` (template facts and questions), per PDF:
 1. map (code): each used section with its headings, size, code's signal densities and opening lines;
 2. categorise (orchestrator): the templates each section answers. Your data/topics.json override wins; a section
    the answer leaves out, or an unreadable answer, falls back to the density rules;
@@ -10,13 +10,20 @@ them. Code checks the plan and runs the workers, and the regex audit alone decid
    the text the audit reads (templates.near);
 4. plan (orchestrator, per template): the entries worth a fact, one name per subject, and a brief where a worker
    needs what its passage doesn't show. An empty plan is kept; an unreadable one falls back to every entry;
-5. workers: an extractor per pick, the fact reviewer and the audit; writers in the template's styles, one repair
-   of a draft the audit rejects (told why), the question reviewer and the audit.
+5. workers: an extractor per pick, the fact reviewer and the audit; writers in the template's styles, then the
+   shared tail (settle): one repair of a draft the audit rejects (told why), the question reviewer and the audit.
 The orchestrator reads the full text of the sections it decides on when it fits ORCHESTRATOR_TEXT_CHARS (set per
-model), else the map; a long map (MAP_CHARS of sections, PLAN_ENTRIES entries) is decided in consecutive groups of
-sections. The calls of one
-step run together (LLM_CONCURRENCY). Output: one row per PDF in data/templates.jsonl, ids <section>:tf01 (facts)
-and <section>:t01 (questions).
+model), else the map; a long map (MAP_CHARS of sections, PLAN_ENTRIES entries) is decided in groups of sections.
+Output: one row per PDF in data/templates.jsonl; ids <section>:tf01 (facts) and <section>:t01 (questions).
+
+`bench questions` (general questions), per group of PDFs (a PDF on its own unless data/topics.json groups it):
+candidates by code (bench/questions.py: which facts suit each type, pairs of facts that share a specific word, absent
+terms from vocab.toml, each section's quota), a plan for the one-fact types and one for the pairs (orchestrator,
+checked by Tally and check_items; code_items plans what it leaves out), one writer call per type and section, the
+shared tail, and duplicates of a question the group already has are rejected. Output: one row per group in
+data/questions.jsonl; ids <section>:q01, and <first fact's section>:h01 for pairs across sections.
+
+The calls of one step run together (LLM_CONCURRENCY).
 """
 
 from __future__ import annotations
@@ -66,6 +73,7 @@ from bench.templates import (
 from bench.verify import (
     NUMBER,
     evidence_text,
+    plain,
     question_problem,
     reason_group,
     uid,
@@ -546,10 +554,12 @@ def write_questions(kept: list[dict[str, Any]], segments: dict[str, dict[str, An
     return questions, rejected
 
 
-# The source of the prompt builders and run-time schemas is fingerprinted too, so a change to their wording redoes the rows.
-BUILDERS = (fact_stage.paragraph_listing, fact_stage.extractor_prompt, fact_stage.review_prompt, question_stage.listing,
-            question_stage.review_prompt, map_lines, categorise_prompt, categories_schema, reader_prompt, reader_schema,
-            entry_line, plan_prompt, writer_prompt, repair_prompt)
+# The source of the prompt builders, run-time schemas and the shared tail is fingerprinted too, so a change to their
+# wording or rules redoes the rows.
+BUILDERS = (fact_stage.paragraph_listing, fact_stage.extractor_prompt, fact_stage.review_prompt, fact_stage.apply_reviews,
+            fact_stage.with_header, question_stage.listing, question_stage.review_prompt, question_stage.apply_reviews,
+            question_stage.finish, map_lines, categorise_prompt, categories_schema, reader_prompt, reader_schema, entry_line,
+            plan_prompt, writer_prompt, told_why, repair_prompt, settle)
 
 
 def fingerprint(segments: list[dict[str, Any]], tmpls: dict[str, Template], topics: dict[str, Any], kinds: dict[str, dict]) -> str:
@@ -946,9 +956,16 @@ def write_items(name: str, items: list[dict[str, Any]], mat: dict[str, Any], typ
                 lambda answer, old: {**old, "question": answer.questions[0].question,
                                      "answer": "" if old["absent_term"] else answer.questions[0].answer} if answer.questions else None)
 
-    questions, rejected = [], []
+    questions, rejected, seen = [], [], set()
     for u, (kept, bad) in zip(keys, settle(units, [drafts[u] for u in keys], reviewer, audit, repair, failed)):
-        done = question_stage.finish(kept, mat["facts"], types, u or "multi-hop")
+        fresh = []
+        for q in kept:  # a question the group already has, word for word, is a duplicate (two types on one fact)
+            if (key := plain(q["question"])) in seen:
+                bad.append({**q, "reason": "same as another question of the group", "decided_by": "audit"})
+            else:
+                seen.add(key)
+                fresh.append(q)
+        done = question_stage.finish(fresh, mat["facts"], types, u or "multi-hop")
         if u:
             questions += [{**q, "segment_id": u} for q in done]
         else:
@@ -968,9 +985,10 @@ def write_items(name: str, items: list[dict[str, Any]], mat: dict[str, Any], typ
 
 
 # The source of the builders and of the plan's checks is fingerprinted too, so a change to them redoes the rows.
-Q_BUILDERS = (question_stage.listing, question_stage.review_prompt, question_stage.needs, question_stage.fits,
-              question_stage.pairs, question_stage.named, question_stage.absent_terms, material, question_plan_schema,
-              question_plan_prompt, Tally, check_items, code_items, item_prompt, drafts_from, told_why)
+Q_BUILDERS = (question_stage.listing, question_stage.review_prompt, question_stage.apply_reviews, question_stage.finish,
+              question_stage.needs, question_stage.fits, question_stage.pairs, question_stage.named, question_stage.absent_terms,
+              material, question_plan_schema, question_plan_prompt, Tally, check_items, code_items, item_prompt, drafts_from,
+              told_why, settle, write_items)
 
 
 def question_fingerprint(name: str, mat: dict[str, Any], types: dict[str, dict]) -> str:

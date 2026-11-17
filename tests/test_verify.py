@@ -211,7 +211,6 @@ TABLE_SEGMENT = {"segment_id": "stats-01", "title": "Highlights", "file_name": "
 
 
 def test_table_rows_are_facts_with_their_header_rows_but_bare_rows_are_not():
-    from bench.segments import sentences
     units = {TABLE[u["start"] : u["end"]]: u["id"] for u in sentences(TABLE)}
     row, bare = units["2024-25 | 247.87 | 3.58"], units["Uttar Pradesh | 38.78"]
     head = units["Year | Milk (million tonnes) | Growth (%)"]
@@ -238,3 +237,23 @@ def test_a_statistical_table_with_a_title_row_and_three_header_rows_has_its_head
 
 def test_bracketed_paragraph_ids_from_the_planner_still_match():
     assert facts.paragraph_ids(["[p3]", " p4 ", "p5"]) == {"p3", "p4", "p5"}
+
+
+def test_the_fact_prompts_are_unchanged():
+    """A tripwire: data/facts.jsonl's fingerprint covers the fact prompts' constants, not the code that fills them in. If
+    this fails, a change altered what the fact agents see: undo it, or bump FACTS_VERSION to redo every fact."""
+    from bench.config import PART_CHARS
+    from bench.segments import heading_path, page_at, parts
+    from bench.verify import uid
+    text = ("Feeding\n\nA milking cow giving 10 litres a day needs 4 kg of concentrate mixture. Clean water should always be there.\n\n"
+            "Region | 2023 | 2024\nGujarat | 12.3 | 14.5\n\nCalves need colostrum within two hours of birth. " * 3)
+    segment = {"segment_id": "book-01", "file_name": "book.pdf", "title": "3 Feeding", "pages": [4, 5], "use_for_questions": True,
+               "headings": [{"title": "Feeding", "page": 4}], "text": text, "page_spans": [{"page": 4, "start": 0, "end": len(text)}]}
+    units, out = sentences(text), []
+    for part in parts(segment, PART_CHARS):
+        inside = [u for u in units if part["start"] <= u["start"] < part["end"]]
+        out.append(facts.planner_prompt(part, inside, text, [{"claim": "Cows need water."}], 3))
+        heading = heading_path(segment, page_at(segment, inside[0]["start"]))
+        out.append(facts.extractor_prompt(heading, facts.Topic(topic="concentrate", kind="figure", paragraphs=["p2"]), inside[:3], text, []))
+    out.append(facts.review_prompt(segment, [{"claim": "A cow needs 4 kg.", "first": units[1]["id"], "last": units[1]["id"]}]))
+    assert out[-1] and uid(out) == "f9d2e2cef837"

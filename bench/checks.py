@@ -28,10 +28,6 @@ from bench.verify import find, kept_fact_problem, question_problem, reason_group
 Check = tuple[str, bool, str]
 
 
-def _rows(path: Path) -> list[dict[str, Any]]:
-    return read_jsonl(path) if path.exists() else []
-
-
 def _missing(path: Path, stage: str) -> list[Check]:
     return [(f"{path.name} exists", False, f"run `bench {stage}` first")]
 
@@ -52,7 +48,7 @@ def check_segment() -> list[Check]:
     misplaced = [s["segment_id"] for s in segments for span in s["page_spans"]
                  if s["text"][span["start"] : span["end"]] != text[(s["file_name"], span["page"])]]
     used = sum(s["use_for_questions"] for s in segments)
-    ingest = {r["file_name"]: r for r in _rows(INGEST)}
+    ingest = {r["file_name"]: r for r in read_jsonl(INGEST, missing_ok=True)}
     no_toc = [name for name, r in ingest.items() if r.get("segmented_by") != "TOC"]
     textless = sum(n for r in ingest.values() for status, n in r["status"].items() if status != "text")
     return [
@@ -72,7 +68,7 @@ def check_facts() -> list[Check]:
     """Facts: every row made from today's inputs, and kept facts still pass the fact rules (models are listed)."""
     if not FACTS.exists():
         return _missing(FACTS, "facts")
-    segments = {s["segment_id"]: s for s in _rows(SEGMENTS)}
+    segments = {s["segment_id"]: s for s in read_jsonl(SEGMENTS, missing_ok=True)}
     used = [sid for sid, s in segments.items() if s["use_for_questions"]]
     rows = {r["segment_id"]: r for r in read_jsonl(FACTS)}
     stale = [sid for sid in used if sid not in rows
@@ -103,12 +99,12 @@ def check_questions() -> list[Check]:
         return [("question_types.toml and vocab.toml are valid", False, str(exc))]
     if not QUESTIONS.exists():
         return _missing(QUESTIONS, "questions")
-    topics, segments = load_topics(), {s["segment_id"]: s for s in _rows(SEGMENTS)}
+    topics, segments = load_topics(), {s["segment_id"]: s for s in read_jsonl(SEGMENTS, missing_ok=True)}
     members = Counter(pdf for pdfs in topics["groups"].values() for pdf in pdfs)
     bad_groups = sorted(pdf for pdf, n in members.items() if n > 1 or pdf not in {s["file_name"] for s in segments.values()})
-    facts_rows = {r["segment_id"]: r for r in _rows(FACTS)}
+    facts_rows = {r["segment_id"]: r for r in read_jsonl(FACTS, missing_ok=True)}
     facts = {f["fact_id"]: f for r in facts_rows.values() for f in r["facts"]}
-    corpus = "\n".join(p["text"] for p in _rows(PAGES))
+    corpus = "\n".join(p["text"] for p in read_jsonl(PAGES, missing_ok=True))
     absent, rows = absent_terms(lists, corpus), {r["group"]: r for r in question_rows()}
     expected = {name: question_fingerprint(name, material(segs, facts_rows, lists, absent), types)
                 for name, segs in question_units(topics, list(segments.values()))}
@@ -149,7 +145,7 @@ def check_index() -> list[Check]:
     """Test bed: chunks cover each segment's text exactly, and Qdrant holds every chunk."""
     if not CHUNKS.exists():
         return _missing(CHUNKS, "index")
-    chunks, segments = read_jsonl(CHUNKS), _rows(SEGMENTS)
+    chunks, segments = read_jsonl(CHUNKS), read_jsonl(SEGMENTS, missing_ok=True)
     by_segment: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for c in chunks:
         by_segment[c["segment_id"]].append(c)
@@ -170,11 +166,8 @@ def check_evaluate() -> list[Check]:
     """Results: exactly the current questions (matched by content id, so stale results can't pass), and a report."""
     if not RESULTS.exists():
         return _missing(RESULTS, "evaluate")
-    scored = [r.get("uid") for r in read_jsonl(RESULTS)]
-    current = [q.get("uid") for r in question_rows() for q in r["questions"]] + [q.get("uid") for q in current_template_questions()]
-    if None in scored or None in current:  # made before content ids: they can't be matched
-        return [("every current question is scored", False, "questions or results have no content id: run `bench questions` "
-                 "and `bench evaluate`")]
+    scored = [r["uid"] for r in read_jsonl(RESULTS)]
+    current = [q["uid"] for r in question_rows() for q in r["questions"]] + [q["uid"] for q in current_template_questions()]
     gone = set(scored) - set(current)
     return [("every current question is scored", set(scored) == set(current) and REPORT.exists(),
              f"{len(set(scored) & set(current))} of {len(set(current))} current questions scored"
@@ -189,7 +182,7 @@ def check_templates() -> list[Check]:
     except BenchError as exc:
         return [("templates/ are valid", False, str(exc))]
     topics = load_topics()
-    sections = {s["segment_id"] for s in _rows(SEGMENTS)}
+    sections = {s["segment_id"] for s in read_jsonl(SEGMENTS, missing_ok=True)}
     bad = [f"{sid}: {names}" for sid, names in topics["sections"].items() if sid not in sections or set(names) - set(tmpls)]
     bad += [key for key in topics["switches"] if key.split(".")[0] not in tmpls
             or ("." in key and key.split(".", 1)[1] not in tmpls[key.split(".")[0]].intents)]
@@ -201,7 +194,7 @@ def check_templates() -> list[Check]:
     tmpls, topics, kinds, corpus, general = template_inputs()
     rows = {r["file_name"]: r for r in pdf_rows()}
     pdfs: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for s in _rows(SEGMENTS):
+    for s in read_jsonl(SEGMENTS, missing_ok=True):
         if s["use_for_questions"]:
             pdfs[s["file_name"]].append(s)
     stale = [n for n, segs in pdfs.items() if n not in rows or rows[n]["fingerprint"] != template_fingerprint(segs, tmpls, topics, kinds)]

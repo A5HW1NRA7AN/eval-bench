@@ -7,8 +7,6 @@ import subprocess
 import sys
 
 import pytest
-from pydantic_ai import ModelResponse, TextPart
-from pydantic_ai.models.function import FunctionModel
 
 from bench import checks, llm, orchestrator, pdf, questions, segments, templates
 from bench import facts as fact_stage
@@ -41,14 +39,6 @@ def _rows(*segs):
 def _material(segs=(FEEDING, EMPTY, CALVES)):
     """g1, g2 (book-01) and g3 (book-04), with their pairs, word lists and absent terms."""
     return orchestrator.material(list(segs), _rows(*segs), LISTS, questions.absent_terms(LISTS, TEXT + CALF_TEXT))
-
-
-def _model(monkeypatch, reply):
-    """Every agent answers reply(instructions, prompt) as JSON, also when asked again after an unreadable answer (the
-    prompt is the conversation's first); answers are never taken from the cache."""
-    monkeypatch.setattr(llm, "USE_CACHE", False)
-    monkeypatch.setattr(llm, "model", lambda: FunctionModel(
-        lambda messages, info: ModelResponse(parts=[TextPart(json.dumps(reply(messages[-1].instructions, messages[0].parts[-1].content)))])))
 
 
 def test_code_builds_the_candidates_eligibility_pairs_and_absent_terms_word_by_word(monkeypatch):
@@ -120,12 +110,12 @@ def test_code_checks_every_planned_item():
     assert [it["facts"] for it in items] == [["g2", "g3"]] and [x["why"] for x in invalid] == ["a pair of the wrong kind", "no such pair"]
 
 
-def test_code_plans_an_unreadable_answer_and_a_section_the_plan_leaves_out(monkeypatch):
+def test_code_plans_an_unreadable_answer_and_a_section_the_plan_leaves_out(monkeypatch, agents):
     mat = _material()
     spread = {n: {**ALL[n], "count": 1} for n in ("direct", "paraphrased", "keyword")}
     items = orchestrator.code_items(spread, mat, orchestrator.Tally(spread, mat), [FEEDING])
     assert [(it["type"], it["facts"]) for it in items] == [("direct", ["g1"]), ("paraphrased", ["g2"]), ("keyword", ["g1"])]
-    _model(monkeypatch, lambda system, prompt: {"no": "items"} if "- multi_hop" in prompt else
+    agents(lambda system, prompt: {"no": "items"} if "- multi_hop" in prompt else
            {"items": [{"type": "direct", "ref": "g1", "absent_term": "", "brief": ""}]})  # book-04 (g3) left out
     planner = llm.agent(orchestrator.question_plan_schema(list(TYPES)), orchestrator.QUESTION_PLAN_PROMPT)
     items, invalid, record = orchestrator.plan_questions("book.pdf", mat, TYPES, planner, failed := [])
@@ -146,13 +136,13 @@ def test_a_pdf_is_a_group_of_its_own_unless_data_topics_json_groups_it():
     assert together["pdf_of"]["herd-01"] == "herd.pdf"
 
 
-def test_code_attaches_each_items_facts_and_absent_term_and_counts_an_unfilled_item(monkeypatch):
+def test_code_attaches_each_items_facts_and_absent_term_and_counts_an_unfilled_item(monkeypatch, agents):
     batch = [{"id": "i2", "type": "unanswerable", "facts": ["g1"], "absent_term": "camel"}]
     answer = questions.ItemDrafts(questions=[questions.ItemDraft(item="", question="How much feed should camels get?", answer="2 kg"),
                                              questions.ItemDraft(item="i2", question="And again?", answer="")])
     assert orchestrator.drafts_from(answer, batch) == [{"type": "unanswerable", "question": "How much feed should camels get?",
                                                         "answer": "", "fact_ids": ["g1"], "absent_term": "camel", "item": "i2"}]
-    _model(monkeypatch, lambda system, prompt: {"reviews": []} if system.startswith("You review") else {"questions": []})
+    agents(lambda system, prompt: {"reviews": []} if system.startswith("You review") else {"questions": []})
     items = [{"id": "i1", "type": "direct", "facts": ["g1"], "absent_term": "", "replaces": "", "brief": "", "by": "code", "fact_ids": ["book-01:f01"]}]
     writers = {n: llm.agent(questions.ItemDrafts, questions.ITEM_WRITER_PROMPT + n) for n in TYPES}
     kept, rejected = orchestrator.write_items("book.pdf", items, _material(), TYPES, writers, None, TEXT, [])
@@ -182,7 +172,7 @@ def _replies(system, prompt):
                            "answer": "1 kg; 4 litres"}]}
 
 
-def test_the_stage_plans_writes_repairs_once_and_resumes_with_no_call(monkeypatch):
+def test_the_stage_plans_writes_repairs_once_and_resumes_with_no_call(monkeypatch, agents):
     rows = _rows(FEEDING, EMPTY, CALVES)
     pdf.write_jsonl(segments.SEGMENTS, [FEEDING, EMPTY, CALVES])
     pdf.write_jsonl(fact_stage.FACTS, list(rows.values()))
@@ -191,7 +181,7 @@ def test_the_stage_plans_writes_repairs_once_and_resumes_with_no_call(monkeypatc
     monkeypatch.setattr(orchestrator, "question_types", lambda: TYPES)
     monkeypatch.setattr(checks, "question_types", lambda: TYPES)
     calls = []
-    _model(monkeypatch, lambda system, prompt: calls.append(1) or _replies(system, prompt))
+    agents(lambda system, prompt: calls.append(1) or _replies(system, prompt))
     orchestrator.run_questions()
 
     (row,) = questions.question_rows()

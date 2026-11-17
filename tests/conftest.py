@@ -1,15 +1,18 @@
 import hashlib
 import importlib
+import json
 import pkgutil
 import re
 from pathlib import Path
 
 import pydantic_ai.models
 import pytest
+from pydantic_ai import ModelResponse, TextPart
+from pydantic_ai.models.function import FunctionModel
 from qdrant_client import QdrantClient
 
 import bench
-from bench import config
+from bench import config, llm
 
 # Every bench module, imported here before any test patches config: a module first imported mid-test would
 # build its paths from the patched DATA_DIR and keep them after the test, and a module left out would write
@@ -53,3 +56,14 @@ def isolated(tmp_path, monkeypatch):
         if hasattr(module, "embed"):
             monkeypatch.setattr(module, "embed", fake_embed)
     return tmp_path
+
+
+@pytest.fixture
+def agents(monkeypatch):
+    """agents(reply): every agent answers reply(instructions, prompt) as JSON, never from the cache. The prompt is the
+    conversation's first, so an answer asked again after an unreadable one gets the same reply."""
+    def use(reply):
+        monkeypatch.setattr(llm, "USE_CACHE", False)
+        monkeypatch.setattr(llm, "model", lambda: FunctionModel(lambda messages, info: ModelResponse(
+            parts=[TextPart(json.dumps(reply(messages[-1].instructions, messages[0].parts[-1].content)))])))
+    return use

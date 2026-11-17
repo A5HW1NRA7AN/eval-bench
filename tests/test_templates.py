@@ -97,10 +97,9 @@ def test_every_committed_example_is_plain_english_and_names_its_subject():
 
 
 def test_templates_are_checked_strictly(tmp_path):
-    good = REPO["animal_care"].model_dump()
     (tmp_path / "ok.toml").write_text('description = "d"\nsignals = ["a"]\n[intents.i]\nkind = "explanation"\n'
                                       'description = "d"\ncues = ["c"]\nexamples = ["e"]\n')
-    assert list(load_templates(tmp_path)) == ["ok"] and good["intents"]
+    assert list(load_templates(tmp_path)) == ["ok"]
     for bad, message in [('signal = ["a"]\n', "signal"),  # a typo for signals
                          ('[intents.i]\nkind = "figure"\ndescription = "d"\ncues = ["c"]\nexamples = ["e"]\n', "needs a shape"),
                          ('[intents.i]\nkind = "figure"\ndescription = "d"\ncues = ["c"]\nshape = ["cash"]\nexamples = ["e"]\n', "unknown shape")]:
@@ -202,7 +201,7 @@ def test_a_template_question_names_its_subject_and_is_not_a_general_question():
     assert template_question_problem({**q, "question": "How can udder infection be prevented?"}, {"s:tf01": fact}, kinds, "", set()).startswith("doesn't name")
     assert template_question_problem(q, {"s:tf01": fact}, kinds, "", {"how can a farmer prevent mastitis"}) == "same as a general question"
     with pytest.raises(BenchError, match="aren't question types"):
-        styles({"x": REPO["animal_care"].model_copy(update={"styles": {"noisy": 1}})})
+        styles({"x": REPO["animal_care"].model_copy(update={"styles": {"unanswerable": 1}})})  # a type, but not one written from facts
 
 
 def test_a_subject_is_named_in_any_case_or_number():

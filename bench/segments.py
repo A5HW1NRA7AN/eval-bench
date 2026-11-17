@@ -1,7 +1,7 @@
 """Cut each PDF into segments along its printed table of contents, one per top-level entry.
 
-The fact agent reads a segment in parts of a few pages, each carrying its heading path and the
-tail of the previous part, so it keeps the context of the whole segment.
+The fact agents read a segment in parts of a few pages, each carrying its heading path and the
+tail of the previous part, so they keep the context of the whole segment.
 """
 
 from __future__ import annotations

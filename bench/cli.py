@@ -1,4 +1,5 @@
-"""`bench` command line: one command per pipeline stage, run in order."""
+"""`bench` command line: the pipeline stages (segment, facts, questions, templates run, index, evaluate, or all of
+them with run), then checks, exports, comparisons, template and group settings, and the web UI."""
 
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from bench.config import FACT_CHARS, MAX_FACTS, MIN_FACTS, BenchError
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 DOC = typer.Option(None, help="Only PDFs whose file name contains this text")
-FORCE = typer.Option(False, help="Redo segments that are already done")
+FORCE = typer.Option(False, help="Redo rows that are already current (per section, group of PDFs or PDF)")
 
 
 @contextmanager
@@ -114,8 +115,8 @@ def evaluate() -> None:
     from bench.checks import print_checks
     from bench.evaluate import run_evaluate
 
-    if not print_checks(["questions", "index"]):
-        raise BenchError("the questions or the test bed failed a check above: fix that before scoring")
+    if not print_checks(["questions", "templates", "index"]):
+        raise BenchError("the questions, template questions or test bed failed a check above: fix that before scoring")
     run_evaluate()
 
 
@@ -221,7 +222,8 @@ def templates_assign(section: str = typer.Argument(..., help="A section id, or p
     chosen = [] if names == "none" else [n.strip() for n in names.split(",") if n.strip()]
     if names != "auto" and (unknown := set(chosen) - set(tmpls)):
         raise BenchError(f"unknown template: {', '.join(sorted(unknown))} (templates: {', '.join(tmpls)})")
-    matched = [s["segment_id"] for s in load_segments() if s["use_for_questions"] and section.lower() in s["segment_id"].lower()]
+    used = [s["segment_id"] for s in load_segments() if s["use_for_questions"]]
+    matched = [section] if section in used else [sid for sid in used if section.lower() in sid.lower()]  # an exact id wins
     if not matched:
         raise BenchError(f"no section used for questions matches {section!r}")
     for sid in matched:
@@ -257,7 +259,7 @@ def group(name: str = typer.Argument(..., help="The group's name"),
     else:
         chosen = []
         for part in (x.strip() for x in pdfs.split(",") if x.strip()):
-            found = [k for k in known if part.lower() in k.lower()]
+            found = [part] if part in known else [k for k in known if part.lower() in k.lower()]  # an exact name wins
             if len(found) != 1:
                 raise BenchError(f"{part!r} matches {len(found)} PDFs in {config.PDF_DIR.name}/; give a part of one file name")
             chosen += found
@@ -315,6 +317,39 @@ def templates_coverage() -> None:
 
 @app.command()
 @_command()
+def compare(a: str = typer.Argument(..., help="A run in data/runs/, or 'current'"), b: str = typer.Argument("current", help="Another run")) -> None:
+    """Two runs on the questions both scored (matched by content id): per type, and what one found that the other missed -> data/compare.md."""
+    from bench.evaluate import compare as compare_runs
+    from bench.evaluate import runs
+    from bench.pdf import write_text
+
+    if a == "list":
+        typer.echo("\n".join(runs()) or "no kept runs yet")
+        return
+    text = compare_runs(a, b)
+    write_text(config.DATA_DIR / "compare.md", text)
+    typer.echo(text)
+
+
+@app.command()
+@_command()
+def score(path: str = typer.Argument(..., help="JSONL: one {\"uid\": ..., \"passages\": [text, ...]} per question, best first")) -> None:
+    """Score another search system by the text it returned for the test set (data/testset.json) -> data/score-<file>.md."""
+    from pathlib import Path
+
+    from bench.evaluate import score_external
+    from bench.pdf import write_text
+
+    source = Path(path)
+    if not source.exists():
+        raise BenchError(f"{path} not found")
+    text = score_external(source)
+    write_text(config.DATA_DIR / f"score-{source.stem}.md", text)
+    typer.echo(text)
+
+
+@app.command()
+@_command()
 def ui(port: int = typer.Option(8501, help="Port on 127.0.0.1")) -> None:
     """Open the web UI (Streamlit, an optional extra: uv run --extra ui bench ui): every stage, per workspace."""
     import subprocess
@@ -327,14 +362,6 @@ def ui(port: int = typer.Option(8501, help="Port on 127.0.0.1")) -> None:
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(config.ROOT / "bench" / "ui.py"), "--server.address", "127.0.0.1",
                     "--server.port", str(port), "--browser.gatherUsageStats", "false"], check=False)
 
-
-@app.command()
-@_command()
-def serve(port: int = typer.Option(8000, help="Port on 127.0.0.1")) -> None:
-    """Browse every stage's output as JSON (for Postman or a browser) on http://127.0.0.1:<port>."""
-    from bench.serve import run_server
-
-    run_server(port)
 
 
 if __name__ == "__main__":

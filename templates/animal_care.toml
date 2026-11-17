@@ -6,7 +6,7 @@ enabled = true
 description = "An animal-care handbook chapter or advisory: a disease, condition or practice, and what a farmer should do."
 subject = "the disease, condition or practice, e.g. Foot and Mouth Disease (FMD)"
 signals = ["symptom", "disease", "vaccin", "infect", "treat", "deworm", "mastitis", "fever", "veterinar", "prevent"]
-min_density = 6  # signal words per 1,000 words for a section to be categorised as animal care
+min_density = 6  # signal words per 1,000 words: the orchestrator's hint, and its fallback when it leaves a section out
 
 [intents.symptoms]
 kind = "explanation"

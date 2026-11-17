@@ -103,6 +103,8 @@ def test_bench_run_end_to_end(book):
     assert {"Plan", "Question plan"} <= set(load_workbook(config.DATA_DIR / "bench.xlsx").sheetnames)
     assert "## Topic templates" in report and "| animal_care.prevention | 1 |" in report
     assert "## Baselines" in report and "| keyword search (BM25) | 1 |" in report
+    assert "## Strict and lenient" in report and "## Dev and held-out" in report and scored["split"] in ("dev", "held-out")
+    assert scored["lenient"]["hit@1"] >= scored["hit@1"] and "strict_lenient" in stats["retrieval"]
     assert CliRunner().invoke(cli.app, ["testset"]).exit_code == 0
     testset = json.loads((config.DATA_DIR / "testset.json").read_text())
     assert testset["test_set"] in report and [i["set"] for i in testset["items"]] == ["general", "template"]

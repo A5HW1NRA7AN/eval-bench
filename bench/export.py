@@ -18,7 +18,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from bench.checks import all_checks
 from bench.config import DATA_DIR, BenchError
-from bench.evaluate import KS, RESULTS, by_method, summary, test_set_id
+from bench.evaluate import KS, RESULTS, by_method, split_of, summary, test_set_id
 from bench.facts import FACTS
 from bench.llm import TRACE
 from bench.pdf import PAGES, read_jsonl, write_text
@@ -33,10 +33,6 @@ CELL_LIMIT = 32_000  # Excel holds at most 32,767 characters in a cell
 WIDE = 60  # width of text columns; others fit their content
 HEADER = PatternFill("solid", fgColor="DDE4EE")
 BAD = PatternFill("solid", fgColor="F8D7DA")
-
-
-def _rows(path: Path) -> list[dict[str, Any]]:
-    return read_jsonl(path) if path.exists() else []
 
 
 def _cell(value: Any) -> Any:
@@ -81,12 +77,12 @@ def home(q: dict[str, Any]) -> str | None:
 
 
 def run_export() -> Path:
-    segments, facts, questions, topical = _rows(SEGMENTS), _rows(FACTS), question_rows(), pdf_rows()
-    results, trace = _rows(RESULTS), _rows(TRACE)
-    chunks = {c["chunk_id"]: c for c in _rows(CHUNKS)}
+    segments, facts, questions, topical = read_jsonl(SEGMENTS, missing_ok=True), read_jsonl(FACTS, missing_ok=True), question_rows(), pdf_rows()
+    results, trace = read_jsonl(RESULTS, missing_ok=True), read_jsonl(TRACE, missing_ok=True)
+    chunks = {c["chunk_id"]: c for c in read_jsonl(CHUNKS, missing_ok=True)}
     facts_by = {r["segment_id"]: r for r in facts}
     kept_in, rejected_in = (Counter(home(q) for r in questions for q in r[field]) for field in ("questions", "rejected"))
-    scored = {r.get("uid") or r["question_id"]: r for r in results}  # by content id, so stale results don't match
+    scored = {r["uid"]: r for r in results}  # by content id, so stale results don't match
     templated = [r for r in results if "template" in r and r.get("answerable", True)]
     answerable = [r for r in results if r.get("answerable", True) and "template" not in r]
 
@@ -100,7 +96,7 @@ def run_export() -> Path:
     book = Workbook()
     book.remove(book.active)
     _sheet(book, "Overview", [
-        {"stage": "pages", "rows": len(_rows(PAGES)), "detail": "cleaned PDF pages"},
+        {"stage": "pages", "rows": len(read_jsonl(PAGES, missing_ok=True)), "detail": "cleaned PDF pages"},
         {"stage": "segments", "rows": len(segments), "detail": f"{sum(s['use_for_questions'] for s in segments)} used for questions"},
         {"stage": "facts", "rows": sum(len(r["facts"]) for r in facts),
          "detail": f"{sum(len(r['rejected']) for r in facts)} rejected by the regex audit; "
@@ -112,7 +108,8 @@ def run_export() -> Path:
         {"stage": "test bed", "rows": len(chunks), "detail": "chunks in Qdrant"},
         {"stage": "evaluate", "rows": len(results),
          "detail": ", ".join(f"{m} {v:.2f}" for m, v in summary(answerable, "type")[0].items() if m.startswith(("hit", "rr")))
-         + f"; {len(results) - len(answerable)} unanswerable" if answerable else "not run"},
+         + f" (general); {sum(not r.get('answerable', True) for r in results)} unanswerable; {len(templated)} template"
+         if answerable else "not run"},
         {"stage": "agent calls", "rows": len(trace), "detail": f"{sum(t['seconds'] for t in trace) / 60:.1f} min in data/trace.jsonl"},
     ])
     _sheet(book, "Segments", [
@@ -136,9 +133,9 @@ def run_export() -> Path:
          "ai_review": q.get("review", {}).get("verdict"), "ai_review_reason": q.get("review", {}).get("reason"),
          "question_before_review": q.get("review", {}).get("original"),
          "fact_ids": ", ".join(q["fact_ids"]), "evidence": "\n---\n".join(ev["quote"] for ev in q["evidence"]),
-         "first_rank": scored.get(q.get("uid") or q["question_id"], {}).get("first_rank"),
-         **{f"hit@{k}": scored.get(q.get("uid") or q["question_id"], {}).get(f"hit@{k}") for k in KS}}
-        for r in questions for q in r["questions"]], bad=lambda row: missed(scored.get(row["uid"] or row["question_id"], {})))
+         "first_rank": scored.get(q["uid"], {}).get("first_rank"),
+         **{f"hit@{k}": scored.get(q["uid"], {}).get(f"hit@{k}") for k in KS}}
+        for r in questions for q in r["questions"]], bad=lambda row: missed(scored.get(row["uid"], {})))
     _sheet(book, "Rejected questions", [{"group": r["group"], "segment_id": home(q), "item": q.get("item"), "reason": q["reason"],
                                          "type": q["type"], "question": q["question"], "answer": q.get("answer"),
                                          "fact_ids": ", ".join(q["fact_ids"]), "repair_of": q.get("repair_of")}
@@ -187,12 +184,10 @@ def run_export() -> Path:
          **{f"top{n}": f"{score:.3f} {passage(cid)}" for n, (cid, score) in enumerate(r["ranked"][:3], start=1)}}
         for r in results], bad=missed)
     if answerable:
-        pdf_of = {s["segment_id"]: s["file_name"] for s in segments}
         _sheet(book, "Metrics by type", summary(answerable, "type"))
         if all("baselines" in r for r in answerable):
             _sheet(book, "Metrics by method", by_method(answerable))
-        _sheet(book, "Metrics by PDF", summary([{**r, "pdf": pdf_of.get(r["question_id"].rsplit(":", 1)[0], "several PDFs")}
-                                                for r in answerable], "pdf"))
+        _sheet(book, "Metrics by PDF", summary(answerable, "document"))
     if templated:
         _sheet(book, "Metrics by intent", summary(templated, "intent"))
     rejects = Counter((stage, reason_group(item["reason"])) for stage, rows, field in
@@ -223,11 +218,11 @@ FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # a spreadsheet would run such
 
 def testset_rows() -> list[dict[str, Any]]:
     """Every current question, general then template, with its answer and evidence (PDF, pages, quote, position)."""
-    pdf_of = {s["segment_id"]: s["file_name"] for s in _rows(SEGMENTS)}
+    pdf_of = {s["segment_id"]: s["file_name"] for s in read_jsonl(SEGMENTS, missing_ok=True)}
     out = []
     for kind, questions in (("general", [q for r in question_rows() for q in r["questions"]]), ("template", current_questions())):
         for q in questions:
-            out.append({"uid": q["uid"], "question_id": q["question_id"], "set": kind, "type": q["type"],
+            out.append({"uid": q["uid"], "question_id": q["question_id"], "set": kind, "type": q["type"], "split": split_of(q),
                         "template": q.get("template"), "intent": q.get("intent"), "subject": q.get("subject"),
                         "question": q["question"], "answer": q.get("answer") or None, "absent_term": q.get("absent_term") or None,
                         "answerable": bool(q["evidence"]),
@@ -250,9 +245,10 @@ def run_testset() -> tuple[Path, Path]:
     header = {"test_set": test_set_id(general), "template_test_set": test_set_id(topical) if topical else None,
               "questions": len(general), "template_questions": len(topical),
               "note": "Each answer is copied from its evidence quotes, which are verbatim PDF text; start and end are "
-                      "character positions in the section (segment) text. uid stays the same across runs."}
+                      "character positions in the section (segment) text. uid stays the same across runs. split: "
+                      "dev or held-out (whole sections are held out); tune a search system on dev and report held-out."}
     write_text(TESTSET_JSON, json.dumps({**header, "items": rows}, indent=1, ensure_ascii=False))
-    columns = ["uid", "question_id", "set", "type", "template", "intent", "subject", "question", "answer", "absent_term",
+    columns = ["uid", "question_id", "set", "type", "split", "template", "intent", "subject", "question", "answer", "absent_term",
                "answerable", "pdf", "pages", "evidence"]
     buffer = io.StringIO()
     writer = csv.writer(buffer)

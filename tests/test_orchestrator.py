@@ -1,11 +1,10 @@
-import dataclasses
+"""The template stage of bench/orchestrator.py (bench templates run): categorise, read, plan, write and repair, rows
+and fingerprints. The general stage of the same module is tested in test_questions.py."""
+
 import json
 import re
-import threading
-import time
 
 import pytest
-from pydantic import BaseModel
 from pydantic_ai import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
@@ -43,13 +42,6 @@ def _segment(sid="book-01", text=TEXT, title="Udder health"):
             "text": text, "pages": [1, 1], "page_spans": [{"page": 1, "start": 0, "end": len(text)}]}
 
 
-def _model(monkeypatch, reply):
-    """Every agent answers reply(instructions, prompt), as JSON; answers are never taken from the cache."""
-    monkeypatch.setattr(llm, "USE_CACHE", False)
-    monkeypatch.setattr(llm, "model", lambda: FunctionModel(
-        lambda messages, info: ModelResponse(parts=[TextPart(json.dumps(reply(messages[-1].instructions, messages[-1].parts[-1].content)))])))
-
-
 def _unreadable(monkeypatch):
     monkeypatch.setattr(llm, "model", lambda: FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("not JSON")])))
 
@@ -67,9 +59,9 @@ def test_the_map_lists_every_section_and_the_full_text_only_when_it_fits():
     assert not fits and "TEXT:" not in prompt and 'opens: "Mastitis Mastitis is an infection' in prompt
 
 
-def test_your_override_wins_and_a_section_the_answer_leaves_out_falls_back_to_the_rules(monkeypatch):
+def test_your_override_wins_and_a_section_the_answer_leaves_out_falls_back_to_the_rules(monkeypatch, agents):
     segs = [_segment(), _segment("book-02", "A shed should face east and stay dry. " * 20, "Housing"), _segment("book-03")]
-    _model(monkeypatch, lambda system, prompt: {"sections": [{"section": "s2", "templates": ["animal_care"]}]})
+    agents(lambda system, prompt: {"sections": [{"section": "s2", "templates": ["animal_care"]}]})
     sections, views = categorise(segs, REPO, {"switches": {}, "sections": {"book-03": []}}, failed := [])
     assert sections == {"book-01": {"templates": ["animal_care"], "by": "rules"},  # left out of the answer: the density rules
                         "book-02": {"templates": ["animal_care"], "by": "orchestrator"},
@@ -87,7 +79,7 @@ def test_your_override_wins_and_a_section_the_answer_leaves_out_falls_back_to_th
         categorise(segs, REPO, NO_TOPICS, [])
 
 
-def test_reader_entries_that_the_audit_could_never_pass_are_dropped_by_code(monkeypatch):
+def test_reader_entries_that_the_audit_could_never_pass_are_dropped_by_code(monkeypatch, agents):
     def reply(system, prompt):
         assert system.startswith("You read one part") and "- prevention:" in prompt and "[p3] To prevent mastitis" in prompt
         entry = {"intent": "prevention", "subject": "mastitis", "paragraphs": ["p2"], "detail": "x"}
@@ -98,7 +90,7 @@ def test_reader_entries_that_the_audit_could_never_pass_are_dropped_by_code(monk
                             {**entry, "intent": "symptoms", "paragraphs": ["p9"]},  # not in the part
                             entry, entry, {**entry, "detail": "over the cap"}]}  # prevention entries 4 and 5 are over the cap
 
-    _model(monkeypatch, reply)
+    agents(reply)
     entries = read([_segment()], {"book-01": {"animal_care": list(REPO["animal_care"].intents)}}, REPO, [])
     assert [e["id"] for e in entries] == ["e1", "e2", "e3", "e4", "e5", "e6"]
     assert [(e["intent"], e["paragraphs"]) for e in entries if not e.get("dropped")] == [("symptoms", ["p2"]), ("prevention", ["p3"])]
@@ -107,7 +99,7 @@ def test_reader_entries_that_the_audit_could_never_pass_are_dropped_by_code(monk
         "no cue word of its intent near it"]
 
 
-def test_the_plan_is_checked_by_code_an_empty_plan_is_kept_and_an_unreadable_one_falls_back(monkeypatch):
+def test_the_plan_is_checked_by_code_an_empty_plan_is_kept_and_an_unreadable_one_falls_back(monkeypatch, agents):
     seg = _segment()
     e1 = {"id": "e1", "segment_id": "book-01", "template": "animal_care", "intent": "symptoms", "subject": "mastitis",
           "paragraphs": ["p2"], "detail": "swelling and discharge", "start": P2, "end": P2_END}
@@ -122,7 +114,7 @@ def test_the_plan_is_checked_by_code_an_empty_plan_is_kept_and_an_unreadable_one
     assert invalid == [{"entry": "e9", "why": "no such entry"}, {"entry": "e1", "why": "listed twice"},
                        {"entry": "A dry floor", "why": "listed twice"}]
 
-    _model(monkeypatch, lambda system, prompt: {"subjects": [], "briefs": []})  # nothing worth a question
+    agents(lambda system, prompt: {"subjects": [], "briefs": []})  # nothing worth a question
     entries = [dict(e1), dict(e2)]
     plans = plan("book.pdf", [seg], entries, REPO, llm.agent(Plan, orchestrator.PLAN_PROMPT), [])
     assert plans["animal_care"][0]["by"] == "orchestrator" and [e["pick"] for e in entries] == [None, None]
@@ -134,9 +126,9 @@ def test_the_plan_is_checked_by_code_an_empty_plan_is_kept_and_an_unreadable_one
                                             {"by": "code", "brief": "a dry floor", "subject": "mastitis"}]
 
 
-def test_a_long_plan_is_split_into_groups_of_sections(monkeypatch):
+def test_a_long_plan_is_split_into_groups_of_sections(monkeypatch, agents):
     monkeypatch.setattr(orchestrator, "PLAN_ENTRIES", 1)
-    _model(monkeypatch, lambda system, prompt: {"subjects": [{"name": "mastitis", "entries": re.findall(r"^e\d+", prompt, re.MULTILINE)}],
+    agents(lambda system, prompt: {"subjects": [{"name": "mastitis", "entries": re.findall(r"^e\d+", prompt, re.MULTILINE)}],
                                                 "briefs": []})
     segs = [_segment(), _segment("book-02")]
     entries = [{"id": f"e{n}", "segment_id": s["segment_id"], "template": "animal_care", "intent": "prevention", "subject": "mastitis",
@@ -147,7 +139,7 @@ def test_a_long_plan_is_split_into_groups_of_sections(monkeypatch):
     assert labels == ["book.pdf animal_care group 1/2", "book.pdf animal_care group 2/2"]
 
 
-def test_a_rejected_question_is_repaired_once_with_the_reason_but_never_to_differ_from_a_general_one(monkeypatch):
+def test_a_rejected_question_is_repaired_once_with_the_reason_but_never_to_differ_from_a_general_one(monkeypatch, agents):
     quote = "To prevent mastitis, keep the shed floor dry and clean the udder before milking."
     fact = {"fact_id": "book-01:tf01", "segment_id": "book-01", "template": "animal_care", "intent": "prevention", "subject": "mastitis",
             "claim": "Keeping the shed floor dry prevents mastitis.", "quote": quote, "start": P3, "end": P3 + len(quote), "pages": [1, 1],
@@ -165,7 +157,7 @@ def test_a_rejected_question_is_repaired_once_with_the_reason_but_never_to_diffe
             return {"questions": [{**draft, "question": "How can a farmer prevent mastitis?", "answer": "keep the floor very dry"}]}
         return {"questions": [{**draft, "question": "How do I stop mastitis in cows?"}]}  # a general question already asks this
 
-    _model(monkeypatch, reply)
+    agents(reply)
     kinds = styles(REPO)
     writers = {n: llm.agent(question_stage.Drafts, question_stage.WRITER_PROMPT + f"{n}: {t['prompt']}") for n, t in kinds.items()}
     reviewer = llm.agent(question_stage.Reviews, question_stage.REVIEWER_PROMPT)
@@ -198,58 +190,3 @@ def test_the_fingerprint_changes_with_the_inputs_and_only_then(monkeypatch):
     assert fingerprint(segs, REPO, {"switches": {}, "sections": {"book-01": ["animal_care"]}}, kinds) != base
     monkeypatch.setattr(orchestrator, "PLAN_PROMPT", orchestrator.PLAN_PROMPT + " Changed.")
     assert fingerprint(segs, REPO, NO_TOPICS, kinds) != base
-
-
-def test_an_outage_stops_new_calls_and_identical_calls_are_asked_once(monkeypatch):
-    class Out(BaseModel):
-        n: int
-
-    asked = []
-
-    def answer(messages, info):
-        n = int(messages[-1].parts[-1].content)
-        asked.append(n)
-        if n == 0:
-            raise ConnectionError("endpoint down")
-        time.sleep(0.05)  # still running when the first call fails
-        return ModelResponse(parts=[TextPart(json.dumps({"n": n}))])
-
-    monkeypatch.setattr(llm, "model", lambda: FunctionModel(answer))
-    monkeypatch.setattr(llm, "USE_CACHE", False)
-    base = llm.settings()
-    monkeypatch.setattr(llm, "settings", lambda: dataclasses.replace(base, concurrency=2))
-    agent = llm.agent(Out, "Echo the number.")
-    with pytest.raises(ConnectionError):
-        llm.call_all([("echo", agent, str(n), f"job {n}") for n in range(6)])
-    assert sorted(asked) == [0, 1]  # the first wave only: the other four never started
-    asked.clear()
-    monkeypatch.setattr(llm, "USE_CACHE", True)
-    answers = llm.call_all([("echo", agent, "7", "job a"), ("echo", agent, "7", "job b")])
-    assert [a.n for a in answers] == [7, 7] and asked == [7]  # one call for both
-    assert [("cached" in json.loads(line)) for line in llm.TRACE.read_text().splitlines()[-2:]] == [False, True]
-
-
-def test_answers_come_back_in_job_order_at_any_concurrency(monkeypatch):
-    class Out(BaseModel):
-        n: int
-
-    running, peak, lock = [0], [0], threading.Lock()
-
-    def answer(messages, info):  # later jobs finish first
-        n = int(messages[-1].parts[-1].content)
-        with lock:
-            running[0] += 1
-            peak[0] = max(peak[0], running[0])
-        time.sleep(0.04 * (5 - n))
-        with lock:
-            running[0] -= 1
-        return ModelResponse(parts=[TextPart(json.dumps({"n": n}))])
-
-    monkeypatch.setattr(llm, "model", lambda: FunctionModel(answer))
-    monkeypatch.setattr(llm, "USE_CACHE", False)
-    base, agent = llm.settings(), llm.agent(Out, "Echo the number.")
-    for limit in (1, 4):
-        monkeypatch.setattr(llm, "settings", lambda limit=limit: dataclasses.replace(base, concurrency=limit))
-        peak[0] = 0
-        assert [o.n for o in llm.call_all([("echo", agent, str(n), f"job {n}") for n in range(5)])] == [0, 1, 2, 3, 4]
-        assert peak[0] == 1 if limit == 1 else 1 < peak[0] <= limit

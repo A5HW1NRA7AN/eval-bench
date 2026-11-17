@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import statistics
 import subprocess
@@ -38,7 +39,7 @@ from bench.testbed import (
     qdrant,
     search,
 )
-from bench.verify import find, reason_group, uid
+from bench.verify import find, pattern, reason_group, uid
 
 KS = (1, 3, 5, 10)
 RANKED = 100  # chunks kept per question, so later metrics need no new search
@@ -48,12 +49,47 @@ REPORT = DATA_DIR / "report.md"
 RESULTS = DATA_DIR / "results.jsonl"
 RUNS = DATA_DIR / "runs"
 SMALL = 30  # groups with fewer questions are marked: their scores move a lot from run to run
+LENIENT_WORDS = 5  # an answer span of at least this many words, found verbatim elsewhere, also counts (lenient score)
+HELD_OUT = 5  # one section in this many is held out, with all its questions: tune a search system on dev only
+WINDOW = 10  # words: a passage another system returns holds a quote if it holds a run of this many of its words
 
 
 def gold_chunks(question: dict[str, Any], chunks: dict[str, list[dict[str, Any]]]) -> list[set[str]]:
     """For each piece of the question's evidence, the chunks of its segment that overlap the quote."""
     return [{c["chunk_id"] for c in chunks[ev["segment_id"]] if c["start"] < ev["end"] and c["end"] > ev["start"]}
             for ev in question["evidence"]]
+
+
+def lenient_gold(question: dict[str, Any], strict: list[set[str]], chunks: list[dict[str, Any]]) -> list[set[str]]:
+    """Strict gold plus, per evidence piece, every chunk in the library that holds its quote verbatim or one of its
+    answer spans of at least LENIENT_WORDS words: the same fact stated in another passage. A regex match, no judging."""
+    spans = [p.strip() for p in question.get("answer", "").split(";") if len(p.split()) >= LENIENT_WORDS]
+    gold = []
+    for ev, own in zip(question["evidence"], strict):
+        needles = [pattern(ev["quote"])] + [pattern(a) for a in spans if find(a, ev["quote"])]
+        gold.append(own | {c["chunk_id"] for c in chunks if any(n.search(c["text"]) for n in needles)})
+    return gold
+
+
+def split_of(question: dict[str, Any]) -> str:
+    """dev or held-out, by section: one section in HELD_OUT is held out with every question that touches it (its own
+    section, or any of its evidence's), so no dev question shares a passage with a held-out one, run after run."""
+    sections = {question["question_id"].rsplit(":", 1)[0]} | {ev["segment_id"] for ev in question["evidence"]}
+    return "held-out" if any(int(uid(s)[:8], 16) % HELD_OUT == 0 for s in sections) else "dev"
+
+
+def words_of(text: str) -> str:
+    """The text's words and numbers in lower case, between single spaces: case, punctuation, line breaks and table
+    pipes don't count when matching another system's text."""
+    return " " + " ".join(re.findall(r"\w+(?:[.,]\d+)*", text.lower())) + " "
+
+
+def holds(passage: str, quote: str) -> bool:
+    """Whether a passage another system returned holds the quote: all of it, or a run of WINDOW of its words (a
+    passage cut elsewhere than our chunks may hold only part of a long quote), the last run included."""
+    words, text = words_of(quote).split(), words_of(passage)
+    last = max(len(words) - WINDOW, 0)
+    return any(f" {' '.join(words[i : i + WINDOW])} " in text for i in sorted({*range(0, last + 1, WINDOW // 2), last}))
 
 
 def check_evidence(question: dict[str, Any], texts: dict[str, str]) -> None:
@@ -111,6 +147,24 @@ def test_set_id(questions: list[dict[str, Any]]) -> str:
     return uid(sorted(q.get("uid", "") for q in questions))
 
 
+def strict_lenient(answerable: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per type, hit@1, hit@10 and rr scored strictly and leniently, and how many questions lenient gold widened."""
+    out = []
+    for name, rows in [("all", answerable), *sorted(groupby(answerable, "type").items())]:
+        loose = [r["lenient"] for r in rows if "lenient" in r] or rows
+        out.append({"type": name, "n": len(rows), **{f"{m} {k}": sum(r[m] for r in src) / len(src)
+                                                   for m in ("hit@1", "hit@10", "rr") for k, src in (("strict", rows), ("lenient", loose))},
+                    "found only leniently@10": sum(bool(r.get("lenient", {}).get("hit@10")) and not r["hit@10"] for r in rows)})
+    return out
+
+
+def groupby(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        groups[r.get(key, "?")].append(r)
+    return groups
+
+
 def by_method(answerable: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One summary row per search method over the same questions: the test bed, then the baselines."""
     rows = []
@@ -124,7 +178,7 @@ def _git() -> str:
     """The commit the code was at, marked when files were changed since (read-only git)."""
     try:
         head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True)
-        dirty = subprocess.run(["git", "status", "--porcelain", "--", "bench", "templates", "question_types.toml"],
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "bench", "templates", "question_types.toml", "vocab.toml"],
                                cwd=ROOT, capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
@@ -152,7 +206,8 @@ def stats(fact_rows: list[dict[str, Any]], question_rows: list[dict[str, Any]], 
                       "ai_flags": flagged(question_rows, "questions")},
         "retrieval": {"by_type": with_intervals(summary(answerable, "type")),
                       "by_document": with_intervals(summary(answerable, "document")),
-                      "by_method": by_method(answerable)},
+                      "by_method": by_method(answerable), "strict_lenient": strict_lenient(answerable),
+                      "by_split": with_intervals(summary(answerable, "split"))},
     }
 
 
@@ -235,12 +290,13 @@ def run_evaluate() -> None:
             gold = gold_chunks(q, chunks_by_segment)
             words = keyword.search(q["question"], RANKED)
             found |= score([cid for cid, _ in hits], gold)
+            found["lenient"] = score([cid for cid, _ in hits], lenient_gold(q, gold, chunks))
             found["baselines"] = {"bm25": score([cid for cid, _ in words], gold),
                                   "hybrid": score([cid for cid, _ in fuse(hits, words, k=RANKED)], gold)}
         document = by_segment_file.get(q["evidence"][0]["segment_id"], "?") if q["evidence"] else "none"
         results.append({"question_id": q["question_id"], "uid": q.get("uid"), "type": q["type"], "document": document,
                         **({"template": q["template"], "intent": f"{q['template']}.{q['intent']}"} if "template" in q else {}),
-                        "question": q["question"], "answerable": bool(q["evidence"]),
+                        "question": q["question"], "answerable": bool(q["evidence"]), "split": split_of(q),
                         "expected": [ev["quote"] for ev in q["evidence"]], **found})
     write_jsonl(RESULTS, results)
     templated = [r for r in results if "template" in r and r["answerable"]]
@@ -253,11 +309,19 @@ def run_evaluate() -> None:
         "# Search benchmark report", "",
         f"Test bed: local Qdrant `{COLLECTION}`, embeddings `{settings().embed_model}`; questions written by {models} "
         f"and verified by the regex audit; test set `{test_set_id(questions)}`. Hit@k: a chunk overlapping the "
-        "question's evidence quote is in the top k. rr: 1 / rank of the first such chunk (MRR@10 when averaged). "
+        "question's evidence quote is in the top k. rr: 1 / rank of the first such chunk in the top 100 (MRR when averaged). "
         f"95%: Wilson interval; groups with fewer than {SMALL} questions are marked n<{SMALL}.", "",
         *_table(with_intervals(summary(answerable, "type"))), "",
         "By the document holding the evidence:", "",
         *_table(with_intervals(summary(answerable, "document"))), "",
+        "## Strict and lenient", "",
+        ("Strict (the headline): only the passage a question was written from counts. Lenient: a chunk elsewhere in the "
+         f"library that holds the same quote, or an answer span of at least {LENIENT_WORDS} words, counts too (regex, no "
+         "judging), since a fact stated twice is found either way."), "",
+        *_table(strict_lenient(answerable)), "",
+        "## Dev and held-out", "",
+        f"One question in {HELD_OUT} is held out, fixed by its content id. Tune a search system on dev; report held-out.", "",
+        *_table(with_intervals(summary(answerable, "split"))), "",
         "## Baselines", "",
         "The same questions searched three ways over the same chunks: the embedding search above, keyword search "
         "(BM25) and a hybrid of the two (reciprocal rank fusion). Gold chunks and scoring are the same for all three.", "",
@@ -292,3 +356,92 @@ def run_evaluate() -> None:
     folder = save_run(questions, rows, results, topical, templated)
     print(f"scored {len(results)} general and {len(topical)} template questions -> {REPORT}; "
           f"run kept in {folder.relative_to(DATA_DIR.parent)}")
+
+
+def run_results(name: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """A kept run's results and manifest by its folder name in data/runs/, or 'current' for data/results.jsonl."""
+    folder = RUNS / name
+    path = RESULTS if name == "current" else folder / "results.jsonl"
+    if not path.exists():
+        raise BenchError(f"no results for {name!r}: give 'current' or a folder of data/runs/ ({', '.join(runs()[-5:])})")
+    manifest = folder / "manifest.json"
+    return read_jsonl(path), (json.loads(manifest.read_text()) if name != "current" and manifest.exists() else {})
+
+
+def runs() -> list[str]:
+    """The runs `bench evaluate` kept (each has a manifest), oldest first: a run's name starts with its time."""
+    return sorted(p.parent.name for p in RUNS.glob("*/manifest.json") if (p.parent / "results.jsonl").exists())
+
+
+def mcnemar(a: list[float], b: list[float]) -> float:
+    """Exact two-sided McNemar p-value for paired hits (0 or 1): how likely a change this large is by chance."""
+    gained, lost = sum(y > x for x, y in zip(a, b)), sum(x > y for x, y in zip(a, b))
+    n = gained + lost
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(gained, lost) + 1)) / 2**n) if n else 1.0
+
+
+def set_of(result: dict[str, Any]) -> str:
+    return "template" if "template" in result else "general"
+
+
+def compare(a: str, b: str) -> str:
+    """Markdown: two runs on the questions both scored (matched by content id), per set (general first, the headline)
+    and type, with McNemar's p for each hit rate, and the questions one found in the top 10 and the other didn't."""
+    (ra, ma), (rb, mb) = run_results(a), run_results(b)
+    ka, kb = ({r["uid"]: r for r in rs if r.get("uid") and r.get("answerable", True)} for rs in (ra, rb))
+    both = sorted(ka.keys() & kb.keys())
+    lines = [f"# Compare {a} with {b}", "",
+             *[f"- {n}: test set `{m.get('test_set', '?')}`, code `{m.get('code', '?')}`, questions by {', '.join(m.get('question_models', [])) or '?'}"
+               for n, m in ((a, ma), (b, mb))],
+             f"- answerable questions in both: {len(both)}; only in {a}: {len(ka.keys() - kb.keys())}; only in {b}: {len(kb.keys() - ka.keys())}", ""]
+    if not both:
+        return "\n".join(lines + ["No question in common: the runs scored different test sets."])
+    rows = []
+    for kind in ("general", "template"):
+        mine = [u for u in both if set_of(ka[u]) == kind]
+        for name, ids in [] if not mine else [("all", mine), *sorted(groupby([{"uid": u, "type": ka[u]["type"]} for u in mine], "type").items())]:
+            ids = ids if name == "all" else [x["uid"] for x in ids]
+            for m in ("hit@1", "hit@10", "rr"):
+                x, y = ([k[u][m] for u in ids] for k in (ka, kb))
+                rows.append({"set": kind, "type": name, "n": len(ids), "metric": m, a: sum(x) / len(ids), b: sum(y) / len(ids),
+                             "change": (sum(y) - sum(x)) / len(ids), "p (McNemar)": f"{mcnemar(x, y):.3f}" if m != "rr" else ""})
+    lines += _table(rows) + ["", "p (McNemar): the chance of a change this large in paired hits if the two runs were equally good.", ""]
+    for label, gained in ((f"Found in the top 10 by {b} only", True), (f"Found in the top 10 by {a} only", False)):
+        flips = [u for u in both if bool(kb[u]["hit@10"]) == gained and bool(ka[u]["hit@10"]) != gained]
+        lines += [f"## {label}: {len(flips)}", ""] + [f"- {ka[u]['question_id']} ({set_of(ka[u])} {ka[u]['type']}): {ka[u]['question']}"
+                                                      for u in flips[:40]] + [""]
+    return "\n".join(lines)
+
+
+def score_external(path: Path) -> str:
+    """Markdown: another search system scored by the text it returned. Each line of the JSONL file is
+    {"uid": ..., "passages": [text, ...]} best first. A passage counts when it holds an evidence quote (holds) and, if
+    the question has an answer, one of its answer spans. Every current answerable question is scored: one with no
+    line is a miss. General questions are the headline; template questions are reported apart."""
+    current = [(q, "general") for row in question_rows() for q in row["questions"]] + [(q, "template") for q in current_questions()]
+    lines = {line.get("uid"): line for line in read_jsonl(path)}
+    scored, answered = [], 0
+    for q, kind in current:
+        if not q["evidence"]:
+            continue
+        line = lines.get(q["uid"])
+        answered += line is not None
+        pieces = [words_of(p).strip() for p in (q.get("answer") or "").split(";") if words_of(p).strip()]
+        hits = {n for n, text in enumerate((line or {}).get("passages", []), start=1)
+                if any(holds(text, ev["quote"]) for ev in q["evidence"]) and (not pieces or any(f" {p} " in words_of(text) for p in pieces))}
+        first = min(hits, default=None)
+        scored.append({"set": kind, "type": q["type"], "split": split_of(q), "rr": 1 / first if first else 0.0,
+                       **{f"hit@{k}": float(first is not None and first <= k) for k in KS}})
+    if not answered:
+        raise BenchError(f"{path.name}: no line matches a current answerable question by uid (see data/testset.json)")
+    unknown = len(lines.keys() - {q["uid"] for q, _ in current})
+    general, template = ([r for r in scored if r["set"] == kind] for kind in ("general", "template"))
+    out = [f"# {path.name} scored by its returned text", "",
+           (f"{answered} of {len(scored)} answerable questions have a line; a question with no line counts as a miss. "
+            f"{sum(not q['evidence'] for q, _ in current)} unanswerable questions aren't scored; {unknown} lines with an unknown uid "
+            f"were skipped. A passage counts when it holds the evidence quote (or a run of {WINDOW} of its words) and one of the "
+            "answer's spans, word for word."), ""]
+    for label, rows in (("General questions (the headline)", general), ("Template questions", template)):
+        if rows:
+            out += [f"## {label}", "", *_table(with_intervals(summary(rows, "type"))), "", *_table(with_intervals(summary(rows, "split"))), ""]
+    return "\n".join(out)

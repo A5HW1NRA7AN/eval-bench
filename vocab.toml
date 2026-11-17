@@ -29,5 +29,5 @@ fodders = ["berseem", "lucerne", "maize", "sorghum", "napier", "oats", "cowpea",
 
 breeds = ["Gir", "Sahiwal", "Red Sindhi", "Tharparkar", "Rathi", "Kankrej", "Ongole", "Hariana", "Deoni", "Holstein Friesian",
           "Jersey", "Brown Swiss", "Murrah", "Mehsani", "Jaffarabadi", "Surti", "Nili Ravi", "Bhadawari", "Toda", "Banni",
-          "Pandharpuri", "Ayrshire", "Guernsey", "Simmental", "Montbeliarde", "Sannen", "Jamunapari", "Beetal", "Barbari",
+          "Pandharpuri", "Ayrshire", "Guernsey", "Simmental", "Montbeliarde", "Saanen", "Jamunapari", "Beetal", "Barbari",
           "Sirohi", "Osmanabadi"]

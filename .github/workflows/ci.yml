@@ -1,4 +1,5 @@
-# Offline tests on every push and pull request: no LLM, Ollama or Qdrant is needed (see tests/conftest.py).
+# Lint (undefined names, unused imports, syntax errors) and the offline tests on every push and pull request:
+# no LLM, Ollama or Qdrant is needed (see tests/conftest.py).
 name: tests
 on: [push, pull_request]
 jobs:
@@ -10,4 +11,5 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - run: uvx ruff check --select F,E9 bench tests
       - run: uv run pytest -q

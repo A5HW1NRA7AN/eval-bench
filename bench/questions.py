@@ -16,6 +16,7 @@ question with its evidence and a content id (uid); ids <section>:q01, and <first
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from collections import Counter
 from pathlib import Path
@@ -244,10 +245,11 @@ def absent_terms(lists: dict[str, list[str]], corpus: str) -> dict[str, list[str
 
 
 def named(fact: dict[str, Any], lists: dict[str, list[str]]) -> dict[str, str]:
-    """The word lists a fact names a term of, each with the first such term: {list name: term}."""
+    """The word lists a fact names a term of, each with the first such term: {list name: term}. A term inside a
+    hyphenated compound doesn't count: "horse-shoe shaped" doesn't name the horse."""
     text = f"{fact['claim']}\n{evidence_text(fact)}"
     found = {}
     for name, terms in lists.items():
-        if term := next((t for t in terms if name_pattern(t).search(text)), None):
+        if term := next((t for t in terms if re.search(rf"(?<![-‐]){name_pattern(t).pattern}(?![-‐])", text, re.IGNORECASE)), None):
             found[name] = term
     return found

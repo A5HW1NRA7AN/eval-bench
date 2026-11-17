@@ -24,7 +24,7 @@ bench = "bench.cli:app"
 
 [project.optional-dependencies]
 ui = [
-    "streamlit>=1.40",
+    "streamlit>=1.50",
 ]
 
 [build-system]

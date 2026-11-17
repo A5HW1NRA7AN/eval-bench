@@ -28,15 +28,21 @@ YEAR = re.compile(r"^(19|20)\d{2}$")
 PAGES = DATA_DIR / "pages.jsonl"
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
+def read_jsonl(path: Path, missing_ok: bool = False) -> list[dict[str, Any]]:
+    """The rows of a JSONL file; with missing_ok, [] for a file no stage has written yet. A bad line is an error,
+    except a torn last line of the agent trace, which is appended to rather than rewritten."""
+    if missing_ok and not path.exists():
+        return []
     rows = []
-    with path.open() as f:
-        for n, line in enumerate(f, start=1):
-            if line.strip():
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError as exc:
-                    raise BenchError(f"{path.name} line {n} isn't valid JSON ({exc.msg}); re-run the stage that writes it") from exc
+    lines = path.read_text().splitlines()
+    for n, line in enumerate(lines, start=1):
+        if line.strip():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                if n == len(lines) and path.name == "trace.jsonl":
+                    break
+                raise BenchError(f"{path.name} line {n} isn't valid JSON ({exc.msg}); re-run the stage that writes it") from exc
     return rows
 
 

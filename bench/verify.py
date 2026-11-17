@@ -336,16 +336,3 @@ def question_problem(q: dict[str, Any], facts: dict[str, dict[str, Any]], rules:
         if asked and len(asked & source) > rules["max_quote_words"] * len(asked):
             return "too many of the question's words come from the quote"
     return None
-
-
-def verify_questions(questions: list[dict[str, Any]], facts: dict[str, dict[str, Any]], types: dict[str, dict],
-                     corpus: str | None = None) -> tuple[list[dict], list[dict]]:
-    """Keep questions that pass the audit, each by its type's rules. Returns (kept, rejected)."""
-    kept, rejected = [], []
-    for q in questions:
-        problem = question_problem(q, facts, types[q["type"]].get("rules", {}), corpus)
-        if problem:
-            rejected.append({**q, "reason": problem, "decided_by": "audit"})
-        else:
-            kept.append(q)
-    return kept, rejected
