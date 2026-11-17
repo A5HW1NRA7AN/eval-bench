@@ -244,6 +244,30 @@ def _switch(name: str, intent: str | None, on: bool) -> None:
     typer.echo(f"{name}{'.' + intent if intent else ''} switched {'on' if on else 'off'}")
 
 
+@app.command()
+@_command(writes=True)
+def group(name: str = typer.Argument(..., help="The group's name"),
+          pdfs: str = typer.Argument(..., help="PDFs, comma-separated parts of their file names; 'none' removes the group")) -> None:
+    """Group PDFs whose facts multi-hop questions may pair (data/topics.json); a PDF in no group is paired only within itself."""
+    from bench.templates import load_topics, save_topics
+
+    topics, known = load_topics(), sorted(p.name for p in config.PDF_DIR.glob("*.pdf"))
+    if pdfs == "none":
+        topics["groups"].pop(name, None)
+    else:
+        chosen = []
+        for part in (x.strip() for x in pdfs.split(",") if x.strip()):
+            found = [k for k in known if part.lower() in k.lower()]
+            if len(found) != 1:
+                raise BenchError(f"{part!r} matches {len(found)} PDFs in {config.PDF_DIR.name}/; give a part of one file name")
+            chosen += found
+        if elsewhere := [p for p in chosen for g, ps in topics["groups"].items() if g != name and p in ps]:
+            raise BenchError(f"already in another group: {', '.join(elsewhere)}")
+        topics["groups"][name] = sorted(set(chosen))
+    save_topics(topics)
+    typer.echo(f"group {name}: {', '.join(topics['groups'].get(name, [])) or 'removed'}")
+
+
 @templates_app.command("on")
 @_command(writes=True)
 def templates_on(name: str, intent: str = typer.Argument(None)) -> None:
@@ -287,6 +311,21 @@ def templates_coverage() -> None:
         counts = Counter(r["status"] for r in rows if r["template"] == name)
         typer.echo(f"{name}: {', '.join(f'{n} {s}' for s, n in counts.items()) or 'no section assigned'}")
     typer.echo(f"wrote {COVERAGE}")
+
+
+@app.command()
+@_command()
+def ui(port: int = typer.Option(8501, help="Port on 127.0.0.1")) -> None:
+    """Open the web UI (Streamlit, an optional extra: uv run --extra ui bench ui): every stage, per workspace."""
+    import subprocess
+    import sys
+
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        raise BenchError("the UI needs Streamlit: run `uv run --extra ui bench ui`") from None
+    subprocess.run([sys.executable, "-m", "streamlit", "run", str(config.ROOT / "bench" / "ui.py"), "--server.address", "127.0.0.1",
+                    "--server.port", str(port), "--browser.gatherUsageStats", "false"], check=False)
 
 
 @app.command()

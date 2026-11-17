@@ -13,8 +13,11 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 ROOT = Path(__file__).resolve().parent.parent
-PDF_DIR = ROOT / "pdfs"
-DATA_DIR = ROOT / "data"
+WORKSPACES = ROOT / "workspaces"
+# BENCH_WORKSPACE picks a folder of its own PDFs and data (workspaces/<name>/); unset, the repo's pdfs/ and data/.
+WORKSPACE = os.environ.get("BENCH_WORKSPACE", "").strip()
+PDF_DIR = WORKSPACES / WORKSPACE / "pdfs" if WORKSPACE else ROOT / "pdfs"
+DATA_DIR = WORKSPACES / WORKSPACE / "data" if WORKSPACE else ROOT / "data"
 
 QUESTION_TYPES = ROOT / "question_types.toml"
 

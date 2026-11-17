@@ -18,12 +18,12 @@ from urllib.parse import urlparse
 from openai import OpenAI
 from qdrant_client import QdrantClient, models
 
-from bench.config import DATA_DIR, BenchError, settings
+from bench.config import DATA_DIR, WORKSPACE, BenchError, settings
 from bench.pdf import read_jsonl, write_jsonl
 from bench.segments import load_segments
 
 CHUNKS = DATA_DIR / "chunks.jsonl"
-COLLECTION = "bench_docs"
+COLLECTION = f"bench_docs_{WORKSPACE}" if WORKSPACE else "bench_docs"  # a Qdrant collection per workspace
 CHUNK_CHARS = 1200
 BATCH = 32
 TOKEN = re.compile(r"[a-z0-9]+(?:[.,][0-9]+)*")  # words and numbers ("247.87", "1,500")

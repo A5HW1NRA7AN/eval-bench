@@ -116,6 +116,26 @@ The `facts` stage saves after every segment, `questions` after every group of PD
 
 Both are recorded on each row and in the run manifest; like the model, they aren't fingerprinted, so switching models doesn't redo finished rows (`--force` does). Ollama's context length must be at least 32K: set it in Ollama.app or with `OLLAMA_CONTEXT_LENGTH`, because its `/v1` API can't set it per request.
 
+## Web UI and workspaces
+
+```
+uv run --extra ui bench ui    # http://127.0.0.1:8501 (Streamlit is an optional extra)
+```
+
+The UI runs the whole project from a browser:
+- **Overview:** counts, every check, and the scored report.
+- **Pipeline:** each stage, or `run` for all of them, plus export, test set and coverage, with live logs and downloads.
+- **PDFs:** upload new PDFs.
+- **Explore:** a section's text with its facts, questions and rejections, and the selected question's evidence highlighted.
+- **Results:** each question's rank, and what the search returned instead.
+- **Search:** live embedding and BM25 search.
+- **Configure:** templates and intents on or off, a section's templates, and groups of PDFs for multi-hop.
+- **Agent calls:** the trace.
+
+The UI only reads `data/`. Every change runs as the matching `bench` command in the background, under the same lock, with its log in `data/ui/`. So the UI and the command line give the same rows, and neither can corrupt the other's run. Groups can also be set from the command line: `bench group <name> <pdf,pdf|none>`.
+
+**Workspaces** keep separate sets of PDFs apart. `BENCH_WORKSPACE=<name>` (or the UI's sidebar) uses `workspaces/<name>/pdfs` and `workspaces/<name>/data`, and its own Qdrant collection `bench_docs_<name>`. Unset, the repo's `pdfs/`, `data/` and `bench_docs` are used as before. `question_types.toml`, `vocab.toml` and `templates/` are shared.
+
 ## Topic templates
 
 A template describes what users ask about one *kind* of document, whatever the PDF: `templates/animal_care.toml`, `templates/govt_scheme.toml` and `templates/statistical_report.toml`; `templates/feeding.toml` (rations, minerals, fodder, water) is a draft, off until its intents are reviewed (`bench templates on feeding`). Each lists **intents** (e.g. symptoms, vaccination schedule; eligibility, benefit; growth, share). Every intent has:
@@ -175,7 +195,7 @@ To add a document type, add a TOML file with the same fields; `bench check templ
 ```
 bench/      cli.py · config.py · llm.py · pdf.py · segments.py · facts.py · questions.py · verify.py · testbed.py · evaluate.py
             templates.py (topic templates and their audit) · orchestrator.py (bench questions, bench templates run)
-            checks.py (bench check) · export.py (bench export) · serve.py (bench serve)
+            checks.py (bench check) · export.py (bench export) · serve.py (bench serve) · ui.py (bench ui)
 tests/      offline tests (no LLM or Qdrant needed): uv run pytest
 postman/    the Postman collection
 question_types.toml   the question types: count, source, prompt and audit rules per type
